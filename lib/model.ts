@@ -153,6 +153,8 @@ export interface CalibrationRow {
   n: number;
   multiple: number;
   fallback: boolean;
+  /** Up to three live protocols in the category, by market cap, so the detail view can name where the multiple comes from. */
+  examples: string[];
 }
 
 export interface RadarData {
@@ -235,20 +237,30 @@ export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): { 
   const overall = median(live.map((p) => p.mcap_usd! / p.tvl_usd));
   const byCategory = new Map<string, number>();
   const perCat = new Map<string, number[]>();
+  const perCatNames = new Map<string, { name: string; mcap: number; slug: string }[]>();
   for (const p of live) {
     const cat = p.category ?? 'Uncategorized';
     const list = perCat.get(cat) ?? [];
     list.push(p.mcap_usd! / p.tvl_usd);
     perCat.set(cat, list);
+    const names = perCatNames.get(cat) ?? [];
+    names.push({ name: p.name, mcap: p.mcap_usd!, slug: p.slug });
+    perCatNames.set(cat, names);
   }
+  /** The category's live protocols by market cap, most valuable first, so the multiple can be traced to names. */
+  const examplesFor = (cat: string): string[] =>
+    [...(perCatNames.get(cat) ?? [])]
+      .sort((a, b) => b.mcap - a.mcap || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
+      .slice(0, 3)
+      .map((e) => e.name);
   const table: CalibrationRow[] = [];
   for (const [cat, ratios] of [...perCat.entries()].sort((a, b) => b[1].length - a[1].length)) {
     if (ratios.length >= model.calibration_min_n) {
       const multiple = median(ratios);
       byCategory.set(cat, multiple);
-      table.push({ category: cat, n: ratios.length, multiple: round4(multiple), fallback: false });
+      table.push({ category: cat, n: ratios.length, multiple: round4(multiple), fallback: false, examples: examplesFor(cat) });
     } else {
-      table.push({ category: cat, n: ratios.length, multiple: round4(overall), fallback: true });
+      table.push({ category: cat, n: ratios.length, multiple: round4(overall), fallback: true, examples: examplesFor(cat) });
     }
   }
   return { overall, byCategory, table };

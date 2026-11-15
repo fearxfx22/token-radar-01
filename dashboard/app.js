@@ -182,6 +182,28 @@ function openDetail(slug, push = true) {
   // must equal the implied value the board carries.
   const recomputed = Math.max(1, Math.round(r.tvl_usd * r.base_multiple * r.growth_multiplier * r.breadth_multiplier * r.maturity_multiplier));
   const agree = recomputed === r.implied_value_usd;
+  // Where the sector multiple comes from: the calibration row for this
+  // category, naming the live protocols it is the median of.
+  const calib = D.calibration.find((c) => c.category === (r.category ?? 'Uncategorized'));
+  let multipleNote = '';
+  if (calib) {
+    const names = calib.examples.map(esc).join(', ');
+    multipleNote = calib.fallback
+      ? `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the overall market median: ${esc(r.category ?? 'Uncategorized')} has only ${calib.n} live protocol${calib.n === 1 ? '' : 's'} with a market cap${names ? ` (${names})` : ''}, below the five needed for a multiple of its own.</p>`
+      : `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the median market-cap / TVL of ${calib.n} live ${esc(r.category ?? 'Uncategorized')} protocols, including ${names}.</p>`;
+  } else {
+    multipleNote = `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the overall market median: no live ${esc(r.category ?? 'Uncategorized')} protocol has a market cap to calibrate against.</p>`;
+  }
+  // What could be wrong: honest flags from the row's own figures, so the
+  // implied value is read with its uncertainty attached.
+  const flags = [];
+  if (!calib || calib.fallback) flags.push('The multiple is the market-wide median, not a sector multiple, so the implied value is less certain than for a category with its own.');
+  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days — the protocol is shrinking, not growing.`);
+  if (r.change_7d === null) flags.push('No 7-day TVL figure, so growth is assumed flat.');
+  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago — a short record, so the maturity factor is still low.`);
+  const watch = flags.length
+    ? `<h3>What to watch</h3><ul class="steps">${flags.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
+    : '';
   $('detail-body').innerHTML = `
     <p class="kicker" style="color:var(--amber-deep)">Rank #${r.rank} · ${esc(r.category ?? 'Uncategorized')} · ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}</p>
     <h2>${esc(r.name)}</h2>
@@ -196,6 +218,8 @@ function openDetail(slug, push = true) {
       <tr class="total"><td>Implied value</td><td>${moneyFull(r.implied_value_usd)}</td></tr>
     </table>
     <p class="fine">${agree ? 'The page recomputes the product above and it matches the board.' : 'Note: the recomputed product differs from the board — see board.json.'}</p>
+    ${multipleNote}
+    ${watch}
     <h3>Farm plan — eight steps</h3>
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
     <p class="fine">No token is confirmed for this protocol. The plan is a way to be positioned if one comes, not a promise that one will.</p>

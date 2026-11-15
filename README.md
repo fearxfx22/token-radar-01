@@ -1,7 +1,12 @@
 # Token Radar
 
+[![make.fun](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/fearxfx22/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/fearxfx22/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01)
+
 An entry for make.fun **token-radar-01** — "Build the best token launch radar"
 ($1,325; 1st $1,000; entries close 2026-12-14 17:10 WIB).
+See the bounty: https://make.fun/bounty/token-radar-01
 
 ## What it is
 
@@ -53,20 +58,29 @@ Writes `board.json`, `data.js`, `dashboard/`, `screenshots/` and
 - `lib/model.ts` — the value model, the farm plans, the board gate check.
 - `vendor/makefun-board.ts` — make.fun's dossier library, copied verbatim
   from the kit (a copy elsewhere counts as lines written).
-- `dashboard/` — `index.html`, `app.css`, `app.js` (25,049 bytes total —
+- `dashboard/` — `index.html`, `app.css`, `app.js` (27,113 bytes total —
   the whole source fits the dossier's 65,536-byte text cap).
 - `screenshots/` — `1-board.png`, `2-detail.png`, `3-filtered.png`
   (1440×900, taken with headless Chrome from the built dashboard).
 - `PLAN.md` — the ranking methodology and farm-plan design.
 - `out/` — the last verified build (board, dossier, screenshots).
 
-## Verified 2026-11-15
+## Verified 2026-11-15 (polished, re-submit pending)
 
 - Board: 178 rows, all 40 watchlist slugs covered, ranks 1..178, implied
   values non-increasing ($403,989,561 → $199,345), every row carries an
   eight-step farm plan (20–600 chars per step). Gate check: clean.
+  The ranking model (radar-2) and board.json are unchanged from the
+  submitted entry — the polish only fixed the README badges, a footnote,
+  and the detail view.
+- Detail view: now names the live protocols each sector multiple is the
+  median of (e.g. Risk Curators: Api3, the only live one), and adds a
+  "What to watch" note per protocol (fallback multiple, shrinking TVL,
+  short record). Fixed a real error: the methodology claimed Risk
+  Curators had no live comparable at all — it has one (Api3).
 - Dossier: rebuilds byte-identical from the output directory; text
-  25,316 bytes with no cut line — the judge reads the whole source.
+  27,380 bytes with no cut line — the judge reads the whole source.
+  Dashboard source 27,113 bytes in 3 files.
 - Determinism: two runs, byte-identical output.
 - Top of the board: Steakhouse Financial $404.0M, Gauntlet $240.6M,
   Veda $231.3M, USDD $150.5M, Upshift $83.0M.
