@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — the pre-token launch board</title>
+<title>Token Radar, the pre-token launch board</title>
+<meta name="description" content="Token Radar ranks 178 pre-token DeFi protocols by the value a token launch would imply, priced on what the live market already pays per dollar of TVL.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="masthead">
   <div class="masthead-in">
-    <p class="kicker">DefiLlama snapshot · 14 Nov 2026 · model radar-2</p>
+    <p class="dateline">DeFiLlama snapshot, 14 November 2026, model radar-2</p>
     <h1>Token Radar</h1>
-    <p class="lede">Which protocol without a token is the launch worth watching? 178 pre-token protocols, ranked by the value a token launch would imply — priced on what the live market already pays per dollar of TVL in each sector.</p>
+    <p class="lede">Which protocol without a token is the launch worth watching? 178 pre-token protocols, ranked by the value a token launch would imply, priced on what the live market already pays per dollar of TVL in each sector.</p>
     <dl class="stats" id="stats"></dl>
   </div>
 </header>
@@ -30,6 +31,7 @@
       <button id="reset" type="button">Reset</button>
     </div>
     <p class="count" id="count"></p>
+      <noscript><p class="noscript-note">This board needs JavaScript to sort and filter the 178 rows. The figures in the methodology section below still read on their own.</p></noscript>
   </section>
 
   <section class="panel" id="board-panel" aria-label="Ranked board">
@@ -51,7 +53,7 @@
   </section>
 
   <section class="panel hidden" id="live-panel" aria-label="Live tokens">
-    <p class="panel-note">These protocols already trade. The board shows the market's own value — a market cap — not a model's. They are here so the radar's two kinds of value are never confused.</p>
+    <p class="panel-note">These protocols already trade. The board shows the market’s own value, a market cap, not a model’s. They are here so the radar’s two kinds of value are never confused.</p>
     <table id="live">
       <thead>
         <tr><th>Protocol</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">mcap / TVL</th><th class="num">7d</th></tr>
@@ -61,7 +63,7 @@
   </section>
 
   <section class="panel hidden" id="setaside-panel" aria-label="Set aside">
-    <p class="panel-note">Twenty protocols sit above the $50M floor and pass the name and category checks, but the watchlist leaves them out. The only watchlist filter the snapshot does not carry is DefiLlama's parent protocol, so these are sub-products or arms of a larger protocol — a vault arm, a regional deployment, a company's product — not launches of their own. The radar shows them and says why it does not rank them.</p>
+    <p class="panel-note">Twenty protocols sit above the $50M floor and pass the name and category checks, but the watchlist leaves them out. The only watchlist filter the snapshot does not carry is DefiLlama’s parent protocol, so these are sub-products or arms of a larger protocol: a vault arm, a regional deployment, a company’s product, not launches of their own. The radar shows them and says why it does not rank them.</p>
     <table id="setaside">
       <thead>
         <tr><th>Protocol</th><th class="num">TVL</th><th>Why set aside</th></tr>
@@ -72,16 +74,18 @@
 
   <section class="panel method" aria-label="How the radar works">
     <h2>How the value is worked out</h2>
-    <p>Every ranked protocol is scored by the same function, from the snapshot's own figures only — TVL, seven-day growth, age, chains, category. No protocol name is special-cased.</p>
+    <p>Every ranked protocol is scored by the same function, from the snapshot’s own figures only: TVL, seven-day growth, age, chains, category. No protocol name is special-cased.</p>
     <p class="formula">implied = TVL × multiple(category) × growth × breadth × maturity</p>
+    <p>The diagram below walks through the top protocol, so you can check every step against the snapshot.</p>
+    <div class="diagram-scroll" id="diagram" role="img" aria-label="Factor chain for the top-ranked protocol"></div>
     <ul>
-      <li><strong>multiple(category)</strong> — the live market's price per TVL dollar in that sector: the median market-cap-to-TVL ratio of the live protocols in the category that have a market cap. A category with fewer than five live comparables uses the overall live median, 0.1689.</li>
-      <li><strong>growth</strong> — 1 + (clamped 7-day change ÷ 100) × 0.5. The change is clamped to −60%…+120% so one wild week (the snapshot's largest is +4,448%) cannot dominate the board. No 7-day figure means 0%.</li>
-      <li><strong>breadth</strong> — 1 + 0.02 per chain beyond the first, capped at 1.10. A protocol live on more chains has more distribution surface for a token.</li>
-      <li><strong>maturity</strong> — 0.6 + min(age, 1,095 days) ÷ 1,095 × 0.4. Older with no token means a longer record of value accruing without a launch; it saturates at three years. Age unknown means 365 days.</li>
+      <li><strong>multiple(category)</strong>: the live market’s price per TVL dollar in that sector: the median market-cap-to-TVL ratio of the live protocols in the category that have a market cap. A category with fewer than five live comparables uses the overall live median, 0.1689.</li>
+      <li><strong>growth</strong>: 1 + (clamped 7-day change ÷ 100) × 0.5. The change is clamped to −60%…+120% so one wild week (the snapshot’s largest is +4,448%) cannot dominate the board. No 7-day figure means 0%.</li>
+      <li><strong>breadth</strong>: 1 + 0.02 per chain beyond the first, capped at 1.10. A protocol live on more chains has more distribution surface for a token.</li>
+      <li><strong>maturity</strong>: 0.6 + min(age, 1,095 days) ÷ 1,095 × 0.4. Older with no token means a longer record of value accruing without a launch; it saturates at three years. Age unknown means 365 days.</li>
     </ul>
-    <h3>The calibration — what the live market pays</h3>
-    <p>Median market-cap / TVL among the snapshot's 144 live protocols with a market cap, by category. Overall median 0.1689 (the mean is 4.479 — skewed by a few outliers, so the median is the honest number).</p>
+    <h3>The calibration: what the live market pays</h3>
+    <p>Median market-cap / TVL among the snapshot’s 144 live protocols with a market cap, by category. Overall median 0.1689 (the mean is 4.479, skewed by a few outliers, so the median is the honest number).</p>
     <table class="calib">
       <thead><tr><th>Category</th><th class="num">Live protocols</th><th class="num">Multiple</th></tr></thead>
       <tbody>
@@ -96,23 +100,23 @@
         <tr><td>CEX</td><td class="num">11</td><td class="num">0.0620</td></tr>
         <tr><td>Yield Aggregator</td><td class="num">5</td><td class="num">0.0504</td></tr>
         <tr><td>Liquid Staking</td><td class="num">11</td><td class="num">0.0343</td></tr>
-        <tr><td>All other categories</td><td class="num">—</td><td class="num">0.1689 †</td></tr>
+        <tr><td>All other categories</td><td class="num">n/a</td><td class="num">0.1689 †</td></tr>
       </tbody>
     </table>
-    <p class="fine">* Fewer than five live comparables, so this category uses the overall median 0.1689 in the model; the 1.2205 shown is the raw median of its four protocols (Across, Hyperlane, Symbiosis, Synapse). † The overall live median, used wherever a category has fewer than five live protocols with a market cap — including Risk Curators, the watchlist's largest category, which has only one live protocol (Api3), below the five needed for its own multiple.</p>
+    <p class="fine">* Fewer than five live comparables, so this category uses the overall median 0.1689 in the model; the 1.2205 shown is the raw median of its four protocols (Across, Hyperlane, Symbiosis, Synapse). † The overall live median, used wherever a category has fewer than five live protocols with a market cap, including Risk Curators, the watchlist’s largest category, which has only one live protocol (Api3), below the five needed for its own multiple.</p>
     <h3>What is ranked, and what is not</h3>
     <ul>
-      <li><strong>Ranked (178):</strong> all 40 watchlist protocols, plus every pre-token protocol below the $50M floor that passes the watchlist's own exclusion rules — no CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC category; no versioned name; no whole word <em>wrapped</em>, <em>staked</em> or <em>staking</em>; no exchange-prefixed name.</li>
+      <li><strong>Ranked (178):</strong> all 40 watchlist protocols, plus every pre-token protocol below the $50M floor that passes the watchlist’s own exclusion rules: no CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC category; no versioned name; no whole word <em>wrapped</em>, <em>staked</em> or <em>staking</em>; no exchange-prefixed name.</li>
       <li><strong>Not ranked:</strong> protocols that already trade (shown in Live tokens at their market caps), wrapped/staked/bridge products of tokens that already trade, and the 20 above-floor protocols the watchlist leaves out (shown in Set aside).</li>
-      <li><strong>The honest caveat:</strong> "records no token" is what the snapshot says, not a promise that no token exists. An implied value is this radar's claim about what a launch could be worth — priced on the live market, but a claim all the same. Farm plans assume no token is confirmed.</li>
+      <li><strong>The honest caveat:</strong> “records no token” is what the snapshot says, not a promise that no token exists. An implied value is this radar’s claim about what a launch could be worth, priced on the live market, but a claim all the same. Farm plans assume no token is confirmed.</li>
     </ul>
     <h3>Farm plans</h3>
-    <p>Every ranked protocol carries an eight-step plan, derived from its own record — category, first chain, TVL, age — never from a hand-written list of names. Capital is tiered by TVL ($50 / $100 / $150 / $250); gas is priced per chain (Ethereum ~$8, Solana ~$0.05, Binance ~$0.10, other chains ~$0.50); the hold is 60 / 45 / 30 days by age. Each step states its action, its cost and its time.</p>
+    <p>Every ranked protocol carries an eight-step plan, derived from its own record (category, first chain, TVL, age), never from a hand-written list of names. Capital is tiered by TVL ($50 / $100 / $150 / $250); gas is priced per chain (Ethereum ~$8, Solana ~$0.05, Binance ~$0.10, other chains ~$0.50); the hold is 60 / 45 / 30 days by age. Each step states its action, its cost and its time.</p>
   </section>
 </main>
 
 <footer>
-  <p>Token Radar · model radar-2 · snapshot DefiLlama, fetched 14 Nov 2026 · 758 protocols ≥ $5M TVL · watchlist floor $50M · data is a frozen snapshot, not live prices.</p>
+  <p>Token Radar, model radar-2, snapshot DefiLlama, fetched 14 November 2026, 758 protocols at or above $5M TVL, watchlist floor $50M, data is a frozen snapshot, not live prices.</p>
 </footer>
 
 <dialog id="detail" aria-label="Protocol detail">

@@ -1,4 +1,4 @@
-// Token Radar — the page. Renders window.RADAR (written by main.ts from the
+// Token Radar, the page. Renders window.RADAR (written by main.ts from the
 // sealed snapshot), sorts and filters the board, and opens one protocol's
 // detail: the model breakdown recomputed in the page and the farm plan the
 // board itself carries, so the page and board.json can never disagree.
@@ -10,7 +10,7 @@ const D = window.RADAR;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/** $404.0M, $1.23B, $477K, $199 — the board's whole-dollar values, readable at a glance. */
+/** $404.0M, $1.23B, $477K, $199: the board's whole-dollar values, readable at a glance. */
 function money(n) {
   if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
   if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
@@ -85,7 +85,7 @@ function renderBoard() {
       <td class="num"><strong>${money(r.implied_value_usd)}</strong><div class="bar"><i style="width:${Math.max(2, (r.implied_value_usd / topImplied) * 100).toFixed(1)}%"></i></div></td>
     </tr>`).join('');
   $('count').textContent = rows.length === D.rows.length
-    ? `${D.rows.length} protocols ranked — the full watchlist plus every clean pre-token protocol below the floor.`
+    ? `${D.rows.length} protocols ranked: the full watchlist plus every clean pre-token protocol below the floor.`
     : `${rows.length} of ${D.rows.length} protocols match.`;
   document.querySelectorAll('#board th[data-sort]').forEach((th) => {
     th.classList.toggle('sorted', th.dataset.sort === sortKey);
@@ -94,10 +94,15 @@ function renderBoard() {
 }
 
 document.querySelectorAll('#board th[data-sort]').forEach((th) => {
-  th.addEventListener('click', () => {
+  const sort = () => {
     if (sortKey === th.dataset.sort) sortDir *= -1;
     else { sortKey = th.dataset.sort; sortDir = sortKey === 'rank' ? 1 : -1; }
     renderBoard();
+  };
+  th.addEventListener('click', sort);
+  th.setAttribute('tabindex', '0');
+  th.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sort(); }
   });
 });
 $('rows').addEventListener('click', (e) => {
@@ -155,7 +160,8 @@ function syncHash(patch) {
   if (next.chain) h.set('chain', next.chain);
   if (next.p) h.set('p', next.p);
   history.replaceState(null, '', h.toString() ? `#${h}` : location.pathname + location.search);
-  applyHash();
+
+applyHash();
 }
 function applyHash() {
   const h = readHash();
@@ -178,7 +184,7 @@ window.addEventListener('hashchange', applyHash);
 function openDetail(slug, push = true) {
   const r = D.rows.find((x) => x.slug === slug);
   if (!r) return;
-  // The breakdown, recomputed here from the row's own figures — the product
+  // The breakdown, recomputed here from the row's own figures. The product
   // must equal the implied value the board carries.
   const recomputed = Math.max(1, Math.round(r.tvl_usd * r.base_multiple * r.growth_multiplier * r.breadth_multiplier * r.maturity_multiplier));
   const agree = recomputed === r.implied_value_usd;
@@ -198,16 +204,16 @@ function openDetail(slug, push = true) {
   // implied value is read with its uncertainty attached.
   const flags = [];
   if (!calib || calib.fallback) flags.push('The multiple is the market-wide median, not a sector multiple, so the implied value is less certain than for a category with its own.');
-  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days — the protocol is shrinking, not growing.`);
+  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing.`);
   if (r.change_7d === null) flags.push('No 7-day TVL figure, so growth is assumed flat.');
-  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago — a short record, so the maturity factor is still low.`);
+  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago, a short record, so the maturity factor is still low.`);
   const watch = flags.length
     ? `<h3>What to watch</h3><ul class="steps">${flags.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
     : '';
   $('detail-body').innerHTML = `
-    <p class="kicker" style="color:var(--amber-deep)">Rank #${r.rank} · ${esc(r.category ?? 'Uncategorized')} · ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}</p>
+    <p class="detail-kicker">Rank #${r.rank}, ${esc(r.category ?? 'Uncategorized')}, ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}</p>
     <h2>${esc(r.name)}</h2>
-    <p class="muted">${esc(r.slug)} · listed ${r.listed_at ?? 'date unknown'} · snapshot ${esc(D.as_of)} · records no token.</p>
+    <p class="muted">${esc(r.slug)}, listed ${r.listed_at ?? 'date unknown'}, snapshot ${esc(D.as_of)}, records no token.</p>
     <h3>How the implied value is worked out</h3>
     <table class="math">
       <tr><td>TVL</td><td>${moneyFull(r.tvl_usd)}</td></tr>
@@ -217,10 +223,10 @@ function openDetail(slug, push = true) {
       <tr><td>× maturity (${r.age_days === null ? 'age unknown, 365 days assumed' : `${r.age_days} days`})</td><td>× ${r.maturity_multiplier.toFixed(4)}</td></tr>
       <tr class="total"><td>Implied value</td><td>${moneyFull(r.implied_value_usd)}</td></tr>
     </table>
-    <p class="fine">${agree ? 'The page recomputes the product above and it matches the board.' : 'Note: the recomputed product differs from the board — see board.json.'}</p>
+    <p class="fine">${agree ? 'The page recomputes the product above and it matches the board.' : 'Note: the recomputed product differs from the board, see board.json.'}</p>
     ${multipleNote}
     ${watch}
-    <h3>Farm plan — eight steps</h3>
+    <h3>Farm plan, eight steps</h3>
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
     <p class="fine">No token is confirmed for this protocol. The plan is a way to be positioned if one comes, not a promise that one will.</p>
     <button id="detail-close" type="button">Close</button>`;
@@ -232,5 +238,52 @@ $('detail').addEventListener('click', (e) => {
   if (e.target.id === 'detail-close') { $('detail').close(); syncHash({ p: '' }); }
 });
 $('detail').addEventListener('close', () => { const h = readHash(); if (h.p) syncHash({ p: '' }); });
+
+// ---------------------------------------------------------------- the model, drawn
+//
+// One factor chain for the top-ranked protocol: each box is the running
+// product after one factor, so the last box is the implied value itself.
+// Every figure comes from the row the board already carries.
+function renderDiagram() {
+  const r = D.rows[0];
+  if (!r) return;
+  const p1 = r.tvl_usd * r.base_multiple;
+  const p2 = p1 * r.growth_multiplier;
+  const p3 = p2 * r.breadth_multiplier;
+  const nodes = [
+    { label: 'TVL', value: money(r.tvl_usd) },
+    { label: 'Multiple', value: money(p1), factor: `× ${r.base_multiple.toFixed(4)}` },
+    { label: 'Growth', value: money(p2), factor: `× ${r.growth_multiplier.toFixed(4)}` },
+    { label: 'Breadth', value: money(p3), factor: `× ${r.breadth_multiplier.toFixed(4)}` },
+    { label: 'Implied value', value: money(r.implied_value_usd), factor: `× ${r.maturity_multiplier.toFixed(4)}`, result: true },
+  ];
+  const W = 104, H = 62, Y = 58, GAP = 64;
+  const xs = nodes.map((_, i) => 8 + i * (W + GAP));
+  const mid = (i) => xs[i] + W / 2;
+  const chain = `Factor chain for ${r.name}: TVL ${money(r.tvl_usd)} times the ${r.category ?? 'Uncategorized'} multiple ${r.base_multiple.toFixed(4)}, growth ${r.growth_multiplier.toFixed(4)}, breadth ${r.breadth_multiplier.toFixed(4)} and maturity ${r.maturity_multiplier.toFixed(4)} gives an implied value of ${money(r.implied_value_usd)}.`;
+  const svg = [
+    `<svg viewBox="0 0 800 176" width="800" height="176" role="img" aria-label="${esc(chain)}">`,
+    `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="diagram-arrowhead"/></marker></defs>`,
+    `<text class="diagram-title" x="8" y="22" font-size="15">${esc(r.name)}, the top-ranked protocol</text>`,
+    ...nodes.map((n, i) => {
+      const cls = n.result ? 'diagram-node-result' : 'diagram-node';
+      const vcls = n.result ? 'diagram-value-result' : 'diagram-value';
+      return `<rect class="${cls}" x="${xs[i]}" y="${Y}" width="${W}" height="${H}"/>` +
+        `<text class="diagram-label" x="${mid(i)}" y="${Y + 24}" text-anchor="middle" font-size="11">${esc(n.label)}</text>` +
+        `<text class="${vcls}" x="${mid(i)}" y="${Y + 46}" text-anchor="middle" font-size="13">${esc(n.value)}</text>`;
+    }),
+    ...nodes.slice(1).map((n, j) => {
+      const x1 = xs[j] + W, x2 = xs[j + 1];
+      return `<line class="diagram-arrow" x1="${x1}" y1="${Y + 31}" x2="${x2}" y2="${Y + 31}" marker-end="url(#arr)"/>` +
+        `<text class="diagram-factor" x="${(x1 + x2) / 2}" y="${Y - 8}" text-anchor="middle" font-size="12">${esc(n.factor)}</text>`;
+    }),
+    `<text class="diagram-note" x="8" y="150" font-size="12">Each box is the running product after one factor, from the snapshot’s own figures. The last box is the implied value on the board.</text>`,
+    `</svg>`,
+  ].join('');
+  const el = $('diagram');
+  el.innerHTML = svg;
+  el.setAttribute('aria-label', chain);
+}
+renderDiagram();
 
 applyHash();
