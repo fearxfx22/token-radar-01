@@ -415,7 +415,7 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
   if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
   if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`;
+  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${capital} into a vault curated by ${name} on ${chain} and keep the shares.`;
   if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
   if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
   if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
@@ -424,10 +424,74 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /**
+ * Points programs verified from each protocol's own site or docs, by slug.
+ * Only these names are ever written into a farm plan. Every other row gets
+ * the honest fallback: no public points program found as of 2026-11-18.
+ * Verified 2026-11-18. Curvance is the one exception to the table: its own
+ * docs confirm a points-based Reward Manager paying USDC every two weeks,
+ * but the program's public name was not verified from a first-party source,
+ * so its step names the mechanism, not a name.
+ */
+const POINTS_PROGRAMS: Record<string, string> = {
+  'veda': 'Veda Points',
+  'symbiotic': 'Symbiotic Points',
+  'plume-vaults': 'Plume Nest Points (PNP)',
+  'upshift': 'Upshift Points (Season 2)',
+  'onre': 'OnRe Points',
+  'tori-finance': 'Cores',
+  'saturn': 'Orbital Points (Season 2, ends Dec 8, 2026)',
+  'aegis-yusd': 'Aegis Points (Season 2)',
+  'doppler-finance': 'Doppler Points (DP)',
+  'tydro': 'TydroInkPoints (Season 2)',
+  'noble': 'Noble Points',
+};
+
+/** Format a dollar amount without trailing zeroes: $8, $8.50, $0.05. */
+function money(v: number): string {
+  const r = Math.round(v * 100) / 100;
+  return Number.isInteger(r) ? `$${r}` : `$${r.toFixed(2)}`;
+}
+
+/** The single qualifying weekly action for a category, in that category's own terms. */
+function weeklyActionFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('curator')) return 'review the curator\'s latest allocation and re-allocate if it moved funds';
+  if (c.includes('allocator')) return 'review the allocator\'s newest vault and move funds only if it beats the current one';
+  if (c.includes('lend')) return 'check the supply APY and top up the deposit if the rate rose';
+  if (c.includes('cdp')) return 'check the collateral ratio and add collateral if it slipped';
+  if (c.includes('collateral')) return 'check the collateral health and top up if the ratio slipped';
+  if (c.includes('dex') || c.includes('yield')) return 'rebalance the liquidity range so the position stays in range';
+  if (c.includes('bridge')) return 'bridge one small test amount to confirm the route still works';
+  if (c.includes('staking') || c.includes('restak')) return 'check the restaked position and re-delegate if a better operator appeared';
+  if (c.includes('perpetual') || c.includes('derivative')) return 'check the margin and top it up if the hedge drifted';
+  if (c.includes('prediction')) return 'place one new market position to keep the account active';
+  if (c.includes('stable')) return 'check the stable asset\'s peg and redeem or re-mint if it drifted';
+  if (c.includes('rwa')) return 'collect the yield distribution and re-deposit it into the same asset';
+  if (c.includes('insurance')) return 'check the cover terms and renew the policy if it is about to lapse';
+  if (c.includes('farm')) return 'harvest the farm yield and re-deposit it into the same farm';
+  if (c.includes('payment')) return 'send one payment to keep the channel balanced';
+  if (c.includes('chain')) return 'make one on-chain transaction to keep the address active';
+  if (c.includes('basis')) return 'check the funding rate and rebalance the hedge if the basis flipped';
+  if (c.includes('cedefi')) return 'check the vault\'s yield report and compound the payout';
+  return 'repeat one qualifying deposit on the protocol';
+}
+
+/** Step 6: name the points program only when it was verified; otherwise say so honestly. */
+function pointsLine(p: SnapshotProtocol): string {
+  const program = POINTS_PROGRAMS[p.slug];
+  if (program) return `Before you withdraw, check your ${program} balance on ${p.name}'s own points page and claim only from the link it publishes.`;
+  if (p.slug === 'curvance') return `Before you withdraw, check your Curvance points balance — rewards pay out in USDC every two weeks, so confirm the current epoch before you claim.`;
+  return `Before you withdraw, check ${p.name}'s own points page: no public points program found as of 2026-11-18 — farm for usage history, not points.`;
+}
+
+/**
  * A protocol's farm plan: eight steps, each an action with a cost and a time.
- * The plan is derived from the protocol's own record (category, chains, TVL,
- * age), never from a hand-written list of names. Funding comes first so the
- * plan works from a cold start; the last step says plainly that no token is
+ * Every step carries the row's own facts (TVL in $M, first chain, category
+ * action, age-derived hold) plus a cost and a time. The plan is derived
+ * from the protocol's own record, except for the points-program names in
+ * POINTS_PROGRAMS, each verified against that protocol's own site or docs
+ * on 2026-11-18. Funding comes first so the plan works from a cold start;
+ * the last step totals the plan's cost and says plainly that no token is
  * confirmed.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
@@ -436,20 +500,33 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
   const gas = gasText(chain);
+  const tvlM = (p.tvl_usd / 1_000_000).toFixed(1);
+  const ageText = age === null ? 'age unknown in the snapshot' : `${age} days old`;
+  // Bridging costs the Ethereum-side gas plus the destination chain's gas;
+  // that already covers the funding step, so no separate gas is charged there.
+  // On Ethereum there is no bridge: funding is one gas payment of its own.
+  const bridgeFee = chain === 'Ethereum' ? 0 : gasFor('Ethereum') + gasFor(chain);
+  const fundGas = chain === 'Ethereum' ? gasFor(chain) : 0;
+  const weeks = Math.ceil(hold / 7);
+  // The tally is exactly the gas and bridge fees the steps themselves state:
+  // bridge (or fund) + deposit + one weekly action a week. The claim in
+  // step 6 is not counted: it costs gas only if a program exists and the
+  // reader chooses to claim, and step 6 says checking is free.
+  const totalFees = bridgeFee + fundGas + gasFor(chain) + weeks * gasFor(chain) * 2;
   const fund =
     chain === 'Ethereum'
-      ? `Fund the wallet with $${capital} of USDC on Ethereum, from an exchange withdrawal or a DEX swap.`
-      : `Bridge $${capital} of USDC from Ethereum to ${chain} through the chain's canonical bridge.`;
-  const fundCost = chain === 'Ethereum' ? `$${capital} of capital and ${gas}` : `$${capital} of capital, about $10 of bridge fees and ${gas}`;
+      ? `Fund the wallet with $${capital} of USDC on Ethereum, from an exchange withdrawal or a DEX swap, for ${p.name}. No bridge is needed because ${p.name} runs on Ethereum.`
+      : `Bridge $${capital} of USDC from Ethereum to ${chain} through the chain's canonical bridge, for ${p.name} on ${chain}.`;
+  const fundCost = chain === 'Ethereum' ? `$${capital} of capital and ${gas}` : `$${capital} of capital, ${money(bridgeFee)} of bridge fees`;
   return [
-    { text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`, cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
+    { text: `Use a fresh wallet that holds only the funds you plan to farm on ${p.name}, and keep its seed phrase offline. ${p.name} holds $${tvlM}M TVL on ${chain}.`, cost: '$0 to create the wallet', time: '5 minutes' },
     { text: fund, cost: fundCost, time: '15 minutes' },
-    { text: action, cost: `$${capital} of capital and ${gas}`, time: '15 minutes to set up' },
-    { text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`, cost: weeklyGasText(chain), time: '10 minutes a week' },
-    { text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`, cost: `the $${capital} stays in the position`, time: `${hold} days` },
-    { text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`, cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-    { text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`, cost: 'nothing but the log', time: '5 minutes' },
-    { text: `Remember that no token is confirmed: a points program may never convert, and a token, if it comes, may list below the implied value. Never deposit more than the $${capital} this plan uses.`, cost: 'no extra cost', time: '2 minutes' },
+    { text: `${action} ${p.name} holds $${tvlM}M TVL, so $${capital} is a small share of the pool.`, cost: `$${capital} of capital and ${gas}`, time: '15 minutes to set up' },
+    { text: `Each week on ${p.name} (${chain}), ${weeklyActionFor(p)}, and log the transaction.`, cost: weeklyGasText(chain), time: '10 minutes a week' },
+    { text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot. ${p.name} is ${ageText}, which sets the ${hold}-day hold.`, cost: `the $${capital} stays in the position`, time: `${hold} days` },
+    { text: pointsLine(p), cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+    { text: `Write the wallet, the dates and every transaction in a farm log for ${p.name} (${chain}, $${tvlM}M TVL), so you can repeat the position or unwind it.`, cost: 'nothing but the log', time: '5 minutes' },
+    { text: `Remember that no token is confirmed: a points program may never convert, and a token, if it comes, may list below the implied value. Never deposit more than the $${capital} this plan uses. Total plan cost: $${capital} capital + ${money(totalFees)} gas and bridge fees.`, cost: 'no extra cost', time: '2 minutes' },
   ];
 }
 
