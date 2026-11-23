@@ -186,27 +186,28 @@ function openDetail(slug, push = true) {
   if (!r) return;
   // The breakdown, recomputed here from the row's own figures. The product
   // must equal the implied value the board carries.
-  const recomputed = Math.max(1, Math.round(r.tvl_usd * r.base_multiple * r.growth_multiplier * r.breadth_multiplier * r.maturity_multiplier));
+  const recomputed = Math.max(1, Math.round(r.tvl_usd * r.fitted_multiple * r.launch_odds));
   const agree = recomputed === r.implied_value_usd;
-  // Where the sector multiple comes from: the calibration row for this
-  // category, naming the live protocols it is the median of.
-  const calib = D.calibration.find((c) => c.category === (r.category ?? 'Uncategorized'));
-  let multipleNote = '';
-  if (calib) {
-    const names = calib.examples.map(esc).join(', ');
-    multipleNote = calib.fallback
-      ? `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the overall market median: ${esc(r.category ?? 'Uncategorized')} has only ${calib.n} live protocol${calib.n === 1 ? '' : 's'} with a market cap${names ? ` (${names})` : ''}, below the five needed for a multiple of its own.</p>`
-      : `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the median market-cap / TVL of ${calib.n} live ${esc(r.category ?? 'Uncategorized')} protocols, including ${names}.</p>`;
-  } else {
-    multipleNote = `<p>The sector multiple ${r.base_multiple.toFixed(4)} is the overall market median: no live ${esc(r.category ?? 'Uncategorized')} protocol has a market cap to calibrate against.</p>`;
-  }
+  // Where the fitted multiple comes from: the line fitted on the snapshot's
+  // live market, evaluated at this protocol's TVL. A bigger TVL gets a
+  // smaller multiple, because the market pays less per TVL dollar for the
+  // biggest protocols: the fitted slope is D.fit.beta1.
+  const atMedian = Math.exp(D.fit.beta0);
+  const multipleNote = `<p>The fitted multiple ${r.fitted_multiple.toFixed(4)} comes from a line fitted on ${D.fit.n} live protocols with a market cap: ln(market cap / TVL) = ${D.fit.beta0} + ${D.fit.beta1} × (ln TVL − ${D.fit.median_log_tvl}). At the median TVL ($${D.fit.median_tvl_usd.toLocaleString('en-US')}) the multiple is ${atMedian.toFixed(4)}; at this protocol's TVL of ${moneyFull(r.tvl_usd)} it is ${r.fitted_multiple.toFixed(4)}. The line's residual spread is ${D.fit.residual_sd} and its R² is ${D.fit.r_squared}, so most of the multiple is still idiosyncratic: the fit is a pricing rule, not a prediction.</p>`;
+  // Where the launch odds come from: the category's eventual launch share
+  // and this protocol's age band, both from peer history in the snapshot.
+  const oddsRow = D.odds_by_category.find((c) => c.category === (r.category ?? 'Uncategorized'));
+  const ageBand = r.age_days === null ? 'unknown' : r.age_days < 365 ? 'under a year' : r.age_days < 1095 ? 'one to three years' : 'over three years';
+  const oddsNote = oddsRow
+    ? `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a ${esc(r.category ?? 'Uncategorized')} protocol listed ${ageBand} ago ever launches a token: among comparable protocols, ${Math.round(oddsRow.eventual_share * 100)}% eventually launch, and the share already launched by this age band is subtracted. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`
+    : `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a protocol listed ${ageBand} ago ever launches a token, from peer history in the snapshot. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`;
   // What could be wrong: honest flags from the row's own figures, so the
   // implied value is read with its uncertainty attached.
   const flags = [];
-  if (!calib || calib.fallback) flags.push('The multiple is the market-wide median, not a sector multiple, so the implied value is less certain than for a category with its own.');
-  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing.`);
-  if (r.change_7d === null) flags.push('No 7-day TVL figure, so growth is assumed flat.');
-  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago, a short record, so the maturity factor is still low.`);
+  if (r.launch_odds <= 0.35) flags.push(`Only about ${Math.round(r.launch_odds * 100)}% of comparable protocols ever launch a token, so most of the value-if-launched is discounted away.`);
+  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing. The model does not use the 7-day change: it was unstable across time, so it is shown as a fact, not priced.`);
+  if (r.change_7d === null) flags.push('No 7-day TVL figure is recorded for this protocol.');
+  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago, a short record, so the launch odds rest on very little history.`);
   const watch = flags.length
     ? `<h3>What to watch</h3><ul class="steps">${flags.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
     : '';
@@ -217,14 +218,13 @@ function openDetail(slug, push = true) {
     <h3>How the implied value is worked out</h3>
     <table class="math">
       <tr><td>TVL</td><td>${moneyFull(r.tvl_usd)}</td></tr>
-      <tr><td>× sector multiple (${esc(r.category ?? 'Uncategorized')})</td><td>× ${r.base_multiple.toFixed(4)}</td></tr>
-      <tr><td>× growth (${r.change_7d === null ? 'no 7-day figure' : `${r.change_7d > 0 ? '+' : ''}${r.change_7d.toFixed(1)}% over 7 days, clamped`})</td><td>× ${r.growth_multiplier.toFixed(4)}</td></tr>
-      <tr><td>× breadth (${r.chains.length} chain${r.chains.length === 1 ? '' : 's'})</td><td>× ${r.breadth_multiplier.toFixed(4)}</td></tr>
-      <tr><td>× maturity (${r.age_days === null ? 'age unknown, 365 days assumed' : `${r.age_days} days`})</td><td>× ${r.maturity_multiplier.toFixed(4)}</td></tr>
-      <tr class="total"><td>Implied value</td><td>${moneyFull(r.implied_value_usd)}</td></tr>
+      <tr><td>× fitted multiple (TVL ${money(r.tvl_usd)})</td><td>× ${r.fitted_multiple.toFixed(4)}</td></tr>
+      <tr><td>× launch odds (${esc(r.category ?? 'Uncategorized')}, ${ageBand})</td><td>× ${r.launch_odds.toFixed(2)}</td></tr>
+      <tr class="total"><td>Implied value (expected value)</td><td>${moneyFull(r.implied_value_usd)}</td></tr>
     </table>
     <p class="fine">${agree ? 'The page recomputes the product above and it matches the board.' : 'Note: the recomputed product differs from the board, see board.json.'}</p>
     ${multipleNote}
+    ${oddsNote}
     ${watch}
     <h3>Farm plan, eight steps</h3>
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
@@ -247,20 +247,16 @@ $('detail').addEventListener('close', () => { const h = readHash(); if (h.p) syn
 function renderDiagram() {
   const r = D.rows[0];
   if (!r) return;
-  const p1 = r.tvl_usd * r.base_multiple;
-  const p2 = p1 * r.growth_multiplier;
-  const p3 = p2 * r.breadth_multiplier;
+  const p1 = r.tvl_usd * r.fitted_multiple;
   const nodes = [
     { label: 'TVL', value: money(r.tvl_usd) },
-    { label: 'Multiple', value: money(p1), factor: `× ${r.base_multiple.toFixed(4)}` },
-    { label: 'Growth', value: money(p2), factor: `× ${r.growth_multiplier.toFixed(4)}` },
-    { label: 'Breadth', value: money(p3), factor: `× ${r.breadth_multiplier.toFixed(4)}` },
-    { label: 'Implied value', value: money(r.implied_value_usd), factor: `× ${r.maturity_multiplier.toFixed(4)}`, result: true },
+    { label: 'Fitted multiple', value: money(p1), factor: `× ${r.fitted_multiple.toFixed(4)}` },
+    { label: 'Implied value', value: money(r.implied_value_usd), factor: `× ${r.launch_odds.toFixed(2)} odds`, result: true },
   ];
-  const W = 104, H = 62, Y = 58, GAP = 64;
-  const xs = nodes.map((_, i) => 8 + i * (W + GAP));
+  const W = 150, H = 62, Y = 58, GAP = 90;
+  const xs = nodes.map((_, i) => 85 + i * (W + GAP));
   const mid = (i) => xs[i] + W / 2;
-  const chain = `Factor chain for ${r.name}: TVL ${money(r.tvl_usd)} times the ${r.category ?? 'Uncategorized'} multiple ${r.base_multiple.toFixed(4)}, growth ${r.growth_multiplier.toFixed(4)}, breadth ${r.breadth_multiplier.toFixed(4)} and maturity ${r.maturity_multiplier.toFixed(4)} gives an implied value of ${money(r.implied_value_usd)}.`;
+  const chain = `Factor chain for ${r.name}: TVL ${money(r.tvl_usd)} times the fitted multiple ${r.fitted_multiple.toFixed(4)}, times the launch odds ${r.launch_odds.toFixed(2)}, gives an expected value of ${money(r.implied_value_usd)}.`;
   const svg = [
     `<svg viewBox="0 0 800 176" width="800" height="176" role="img" aria-label="${esc(chain)}">`,
     `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="diagram-arrowhead"/></marker></defs>`,

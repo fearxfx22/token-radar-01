@@ -1,4 +1,4 @@
-// radar-2: the token radar's entry point (Node 22, standard library only).
+// radar-3: the token radar's entry point (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every clean pre-token protocol with the model in lib/model.ts, writes
@@ -94,6 +94,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 const top = board.slice(0, 5).map((r) => `${r.rank}. ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')}`).join(', ');
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.set_aside_size} above the floor set aside)\n` +
-    `token radar: overall live mcap/TVL ${radar.overall_multiple}; top: ${top}\n` +
+    `token radar: radar-3 fit ln(mcap/TVL) = ${radar.fit.beta0} + ${radar.fit.beta1} * (ln TVL - ${radar.fit.median_log_tvl}), n=${radar.fit.n}, R2=${radar.fit.r_squared}; top: ${top}\n` +
     `token radar: dashboard source ${dashBytes} bytes in ${dashFiles.length} files; wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
