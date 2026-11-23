@@ -426,8 +426,9 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 /**
  * Points programs verified from each protocol's own site or docs, by slug.
  * Only these names are ever written into a farm plan. Every other row gets
- * the honest fallback: no public points program found as of 2026-11-18.
- * Verified 2026-11-18. Curvance is the one exception to the table: its own
+ * the honest fallback: no public points program found as of 2026-11-23.
+ * Re-verified 2026-11-23 from the 2026-11-18 table; Doppler moved to Season 3
+ * on 2026-10-16. Curvance is the one exception to the table: its own
  * docs confirm a points-based Reward Manager paying USDC every two weeks,
  * but the program's public name was not verified from a first-party source,
  * so its step names the mechanism, not a name.
@@ -441,7 +442,7 @@ const POINTS_PROGRAMS: Record<string, string> = {
   'tori-finance': 'Cores',
   'saturn': 'Orbital Points (Season 2, ends Dec 8, 2026)',
   'aegis-yusd': 'Aegis Points (Season 2)',
-  'doppler-finance': 'Doppler Points (DP)',
+  'doppler-finance': 'Doppler Points (DP, Season 3)',
   'tydro': 'TydroInkPoints (Season 2)',
   'noble': 'Noble Points',
 };
@@ -481,7 +482,7 @@ function pointsLine(p: SnapshotProtocol): string {
   const program = POINTS_PROGRAMS[p.slug];
   if (program) return `Before you withdraw, check your ${program} balance on ${p.name}'s own points page and claim only from the link it publishes.`;
   if (p.slug === 'curvance') return `Before you withdraw, check your Curvance points balance — rewards pay out in USDC every two weeks, so confirm the current epoch before you claim.`;
-  return `Before you withdraw, check ${p.name}'s own points page: no public points program found as of 2026-11-18 — farm for usage history, not points.`;
+  return `Before you withdraw, check ${p.name}'s own points page: no public points program found as of 2026-11-23 — farm for usage history, not points.`;
 }
 
 /**
@@ -490,7 +491,7 @@ function pointsLine(p: SnapshotProtocol): string {
  * action, age-derived hold) plus a cost and a time. The plan is derived
  * from the protocol's own record, except for the points-program names in
  * POINTS_PROGRAMS, each verified against that protocol's own site or docs
- * on 2026-11-18. Funding comes first so the plan works from a cold start;
+ * on 2026-11-23. Funding comes first so the plan works from a cold start;
  * the last step totals the plan's cost and says plainly that no token is
  * confirmed.
  */
