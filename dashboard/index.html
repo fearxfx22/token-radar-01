@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Token Radar, the pre-token launch board</title>
-<meta name="description" content="Token Radar ranks 206 pre-token DeFi protocols by the expected value a token launch would imply, priced by a value model fitted on the live market and weighted by the odds a token ever launches.">
+<meta name="description" content="Token Radar ranks 340 pre-token DeFi protocols by the expected value a token launch would imply, priced by a value model fitted on the live market and weighted by the odds a token ever launches.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="masthead">
   <div class="masthead-in">
-    <p class="dateline">DeFiLlama snapshot, 14 November 2026, model radar-3</p>
+    <p class="dateline">DeFiLlama snapshot, 14 November 2026, model radar-6</p>
     <h1>Token Radar</h1>
-    <p class="lede">Which protocol without a token is the launch worth watching? 206 pre-token protocols, ranked by the expected value a token launch would imply: the value if one launched, priced by a model fitted on the live market, times the odds that one ever launches.</p>
+    <p class="lede">Which protocol without a token is the launch worth watching? 340 pre-token protocols, ranked by the expected value a token launch would imply: the value if one launched, priced by a model fitted on the live market, times the odds that one ever launches. A further 274 pre-token protocols are set aside with their reasons, and the 144 that already trade are shown as comparables.</p>
     <dl class="stats" id="stats"></dl>
   </div>
 </header>
@@ -74,64 +74,51 @@
 
   <section class="panel method" aria-label="How the radar works">
     <h2>How the value is worked out</h2>
-    <p>Every ranked protocol is scored by the same function, from the snapshot’s own figures only: TVL, age, category. No protocol name is special-cased. The implied value is an expected value: the value if a token launched, times the odds that one ever launches.</p>
-    <p class="formula">implied = TVL × fitted multiple(TVL) × P(launch)</p>
+    <p>Every ranked protocol is scored by the same function, from the snapshot’s own figures only: TVL, age, 7-day growth, chain count, category. No protocol name is special-cased. The implied value is an expected value: the value if a token launched, times the odds that one ever launches.</p>
+    <p class="formula">implied = TVL × fitted multiple × P(launch eventually)</p>
     <p>The diagram below walks through the top protocol, so you can check every step against the snapshot.</p>
     <div class="diagram-scroll" id="diagram" role="img" aria-label="Factor chain for the top-ranked protocol"></div>
     <ul>
-      <li><strong>fitted multiple(TVL)</strong>: exp(−1.30 − 0.48 × (ln TVL − 17.30)). A ridge regression of ln(market cap / TVL) on ln TVL, fitted on the 128 live protocols with a positive market cap. The market pays less per TVL dollar for the biggest protocols, and the fit says so with a slope, not a guess: at the median TVL ($32.6M) the multiple is 0.27; a protocol ten times the median TVL gets 0.09; one ten times smaller gets 0.82.</li>
-      <li><strong>P(launch)</strong>: the forward odds that a protocol which has run this long with no token ever launches one, from peer history inside the snapshot. Among comparable protocols, what fraction already has a token, by age band? The cross-sectional fraction rises with age (0.33 under a year, 0.45 one to three years, 0.79 over three years), so an old protocol that still has no token is less likely to ever launch, not more. The odds are (eventual share − share launched by this age) ÷ (1 − share launched by this age), floored at 0.25 and capped at 0.90. A category with fewer than eight protocols borrows the market-wide rates.</li>
+      <li><strong>fitted multiple</strong>: a ridge regression of ln(market cap) on ln TVL, ln age, 7-day TVL change (clipped to −30% / +100%), ln chain count, and the ten most common categories, fitted on the 128 live protocols with a positive market cap (penalty λ = 30). The market pays less per TVL dollar for the biggest protocols: the fitted ln TVL slope is 0.47, so a protocol ten times the median TVL gets roughly a third of the multiple, and one ten times smaller gets roughly 3.4 times the multiple. The growth term is clipped because the snapshot has rows at −72.7% and +4448% in a week, and an unclipped collapse would inflate the multiple — the unclipped fit put a protocol that had just lost 73% of its TVL at rank 1 with a 4.6x multiple.</li>
+      <li><strong>P(launch eventually)</strong>: the forward odds that a protocol which has run this long with no token ever launches one. The share of protocols that have launched by age <em>a</em> is fitted as F(<em>a</em>) = 0.425 × (1 − exp(−<em>a</em> / 950 days)) by maximum likelihood over all 758 protocols; the forward odds are (0.425 − F(<em>a</em>)) ÷ (1 − F(<em>a</em>)), floored at 0.02 and capped at 0.90. The odds fall with age — 0.40 at 90 days, 0.34 at a year, 0.26 at two years, 0.10 at five years — because a protocol that has run for years without a token is less likely to ever launch one than a young one. A cross-sectional rate would say the opposite, because older protocols have had more time to launch; that is why the category-median odds of radar-5 were replaced.</li>
     </ul>
     <h3>The fitted multiple, at a few TVLs</h3>
-    <p>From the fitted line ln(market cap / TVL) = −1.30 − 0.48 × (ln TVL − 17.30), over the snapshot’s 128 live protocols with a positive market cap. Residual spread 2.08, R² 0.17: most of the multiple is still idiosyncratic, so the line is a pricing rule, not a prediction.</p>
+    <p>For a reference protocol — a year old, flat 7-day change, one chain, no category effect — from the fitted ridge (ln market cap = 8.25 + 0.47 × ln TVL − 0.12 × ln(age + 1) − 0.04 × 7-day change + 0.10 × ln chains + category). Residual spread 2.15, R² 0.24: most of the multiple is still idiosyncratic, so the fit is a pricing rule, not a prediction. A real protocol's multiple also moves with its age, growth, chains and category.</p>
     <table class="calib">
       <thead><tr><th>TVL</th><th class="num">Fitted multiple</th></tr></thead>
       <tbody>
-        <tr><td>$3M</td><td class="num">0.8496</td></tr>
-        <tr><td>$10M</td><td class="num">0.4785</td></tr>
-        <tr><td>$32.6M (median)</td><td class="num">0.2725</td></tr>
-        <tr><td>$50M (the floor)</td><td class="num">0.2221</td></tr>
-        <tr><td>$100M</td><td class="num">0.1596</td></tr>
-        <tr><td>$500M</td><td class="num">0.0741</td></tr>
-        <tr><td>$1B</td><td class="num">0.0532</td></tr>
+        <tr><td>$3M</td><td class="num">0.6859</td></tr>
+        <tr><td>$10M</td><td class="num">0.3627</td></tr>
+        <tr><td>$32.6M (median)</td><td class="num">0.1941</td></tr>
+        <tr><td>$50M (the floor)</td><td class="num">0.1548</td></tr>
+        <tr><td>$100M</td><td class="num">0.1073</td></tr>
+        <tr><td>$500M</td><td class="num">0.0458</td></tr>
+        <tr><td>$1B</td><td class="num">0.0317</td></tr>
       </tbody>
     </table>
     <h3>The launch odds, by category</h3>
-    <p>Median forward odds over each category’s pre-token protocols, and the category’s eventual launch share: the fraction of comparable protocols that ever launch a token, estimated from its old protocols and shrunk toward the market-wide old-band rate. A protocol in a small category (fewer than eight protocols) gets the market-wide odds: about 0.68 if listed under a year ago, 0.61 if one to three years old, 0.25 (the floor) if older.</p>
+    <p>Median forward odds over each category’s pre-token protocols, and the category’s eventual launch share: the fraction of protocols in the category that already have a token. The odds themselves are age-based, from the single saturating curve above — the category only summarises them; a young protocol in any category has higher odds than an old one in the same category.</p>
     <table class="calib">
       <thead><tr><th>Category</th><th class="num">Pre-token</th><th class="num">Median odds</th><th class="num">Eventual share</th></tr></thead>
-      <tbody>
-        <tr><td>Derivatives</td><td class="num">13</td><td class="num">0.69</td><td class="num">0.76</td></tr>
-        <tr><td>Lending</td><td class="num">16</td><td class="num">0.67</td><td class="num">0.88</td></tr>
-        <tr><td>Yield</td><td class="num">16</td><td class="num">0.65</td><td class="num">0.81</td></tr>
-        <tr><td>Dexs</td><td class="num">26</td><td class="num">0.61</td><td class="num">0.78</td></tr>
-        <tr><td>Yield Aggregator</td><td class="num">9</td><td class="num">0.56</td><td class="num">0.73</td></tr>
-        <tr><td>Bridge</td><td class="num">28</td><td class="num">0.54</td><td class="num">0.73</td></tr>
-        <tr><td>Liquid Staking</td><td class="num">38</td><td class="num">0.53</td><td class="num">0.71</td></tr>
-        <tr><td>CDP</td><td class="num">10</td><td class="num">0.51</td><td class="num">0.72</td></tr>
-        <tr><td>RWA</td><td class="num">16</td><td class="num">0.46</td><td class="num">0.72</td></tr>
-        <tr><td>Risk Curators</td><td class="num">34</td><td class="num">0.41</td><td class="num">0.51</td></tr>
-        <tr><td>Basis Trading</td><td class="num">8</td><td class="num">0.39</td><td class="num">0.73</td></tr>
-        <tr><td>Onchain Capital Allocator</td><td class="num">20</td><td class="num">0.30</td><td class="num">0.55</td></tr>
-      </tbody>
+      <tbody id="odds-rows"></tbody>
     </table>
-    <h3>Validation: does the fitted model beat the old one out of sample?</h3>
-    <p>Repeated 5-fold cross-validation, twenty repeats (100 folds), on the 128 labeled live protocols: fit on the training folds, predict the held-out fold. The fitted line cuts the error on ln(market cap / TVL) from 2.35 (radar-2’s category medians) to 2.09, an 11% cut. Ranked by implied value against realized market cap, the fitted multiple alone scores Spearman 0.43 against radar-2’s 0.40. Walk-forward by listing date (train on protocols listed before the cutoff, test on those listed after) favors the full radar-3 model with odds on all four cutoffs: 0.41 / 0.37 / 0.30 / 0.08 against radar-2’s 0.36 / 0.33 / 0.27 / −0.09.</p>
-    <p>The honest limit: the launch odds cannot be validated out of sample on this snapshot, because no launch dates are recorded, so there is no held-out launch to predict. The random cross-validation above applies the odds to protocols that already launched, where the odds should be 1, so it penalizes them by construction (Spearman 0.39 with odds, 0.43 without). The odds are a peer-history estimate, kept because the value is an expected value and because how long a protocol has run with no token is a figure the value must follow from — not a validated prediction.</p>
-    <p>What changed from radar-2, and why: the per-category medians are gone (most categories had fewer than five live protocols with a market cap, so most rows were priced on the overall median anyway, and the medians that did exist were noisy). The hand-set growth, breadth and maturity multipliers are gone (they added no held-out rank accuracy: radar-2 scored Spearman 0.401 with them and 0.408 without). Growth in particular is unstable across time — its fitted slope flips sign between walk-forward trains — so the 7-day change is shown on the board as a fact and no longer priced. Age now enters through the launch odds, in the direction the data supports.</p>
+    <h3>Validation: does the fitted model beat the TVL-only line out of sample?</h3>
+    <p>Fixed splits, decided before modelling: a locked holdout of 26 live protocols, 5-fold and 10-fold cross-validation on the other 102, and a walk-forward split (train on protocols listed before 2024, test on those listed after). The snapshot’s figures explain only about 20% of log market-cap variance — that is the data’s ceiling, not the model’s. 10-fold CV: ridge 0.14 vs the TVL-only line 0.15, a wash. 5-fold: ridge 0.20 vs the line 0.17. The locked holdout favours the simple line outright (R² 0.22, MSE 4.41, Spearman 0.53) against the ridge (R² 0.15, MSE 4.83, Spearman 0.45). Walk-forward is the one split the ridge wins: +0.05 against −0.06 for the line. The simple fit goes negative out of time; the ridge stays positive — and a board is a forward bet, so the time-robust model ships, not because its random-split fit is better but because it survives the direction the board actually faces.</p>
+    <p>The honest limit: the launch odds cannot be validated out of sample on this snapshot, because no launch dates are recorded, so there is no held-out launch to predict. The saturating curve they derive from is validated — 5-fold CV log-loss 0.49, tied with a logistic on age and TVL (0.48) and better than the base rate (0.51) — but the forward odds themselves are a peer-history estimate, not a validated prediction, and no score for them is invented here.</p>
+    <p>What changed from radar-5, and why: the TVL-only multiple is gone — the ridge now fits every value term the snapshot carries (TVL, age, 7-day growth, chain count, category), with the growth term clipped to [−30%, +100%] so one wild week cannot dominate a multiple. The category-median launch odds are gone — replaced by forward odds from a saturating launch curve, because a cross-sectional rate rewards old protocols for having had more time to launch, which is the wrong direction for a board. The board grew from 206 to 340 ranked rows, and the 274 pre-token protocols that fail the existence screens are now listed in Set aside with their reasons instead of being silently dropped.</p>
     <h3>What is ranked, and what is not</h3>
     <ul>
-      <li><strong>Ranked (206):</strong> all 40 watchlist protocols, plus every pre-token protocol below the $50M floor that passes the board’s exclusion rules: no CEX or Canonical Bridge category (an exchange and an arm of a chain, not launches of their own); no versioned name; no whole word <em>wrapped</em>, <em>staked</em> or <em>staking</em>; no exchange-prefixed name. Bridges, liquid-staking, liquid-restaking and restaked-BTC protocols are ranked: they are standalone launches of their own.</li>
-      <li><strong>Not ranked:</strong> protocols that already trade (shown in Live tokens at their market caps), wrapped/staked products of tokens that already trade, and the 20 above-floor protocols the watchlist leaves out (shown in Set aside).</li>
+      <li><strong>Ranked (340):</strong> all 40 watchlist protocols, plus every pre-token protocol below the $50M floor that passes the board’s existence screens: no CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC category; no versioned name; no whole word <em>wrapped</em>, <em>staked</em> or <em>staking</em>. A versioned name is a version of a protocol whose token already trades (Aave V3, Uniswap V4), and a CEX or a bridge is not a launch of its own.</li>
+      <li><strong>Not ranked:</strong> protocols that already trade (shown in Live tokens at their market caps), and the 274 pre-token protocols that fail an existence screen (shown in Set aside with the reason).</li>
       <li><strong>The honest caveat:</strong> “records no token” is what the snapshot says, not a promise that no token exists. An implied value is this radar’s claim about what a launch could be worth, priced on the live market, but a claim all the same. Farm plans assume no token is confirmed.</li>
     </ul>
     <h3>Farm plans</h3>
-    <p>Every ranked protocol carries an eight-step plan, derived from its own record (category, first chain, TVL, age), never from a hand-written list of names. Capital is tiered by TVL ($50 / $100 / $150 / $250); gas is priced per chain (Ethereum ~$8, Solana ~$0.05, Binance ~$0.10, other chains ~$0.50); the hold is 60 / 45 / 30 days by age. Each step states its action, its cost and its time.</p>
+    <p>Every ranked protocol carries an eight-step plan, derived from its own record (category, first chain, TVL, age), never from a hand-written list of names. Capital is a flat $150 of USDC; gas is priced per chain (Ethereum ~$8, other chains ~$0.50, a bridge ~$8.50, ~$1 a week); the hold is 30 days. Each step states its action, its cost and its time, and the step-8 total is computed from the same numbers, so it always reconciles with steps 2–4. Points programs are named only where verified live on 2026-11-23 (11 programs); 28 protocols were individually checked with no public program found; every other row says to check the protocol’s own points page instead of claiming a program status that was not audited.</p>
   </section>
 </main>
 
 <footer>
-  <p>Token Radar, model radar-3, snapshot DefiLlama, fetched 14 November 2026, 758 protocols at or above $5M TVL, watchlist floor $50M, data is a frozen snapshot, not live prices.</p>
+  <p>Token Radar, model radar-6, snapshot DefiLlama, fetched 14 November 2026, 758 protocols at or above $5M TVL, watchlist floor $50M, data is a frozen snapshot, not live prices.</p>
 </footer>
 
 <dialog id="detail" aria-label="Protocol detail">

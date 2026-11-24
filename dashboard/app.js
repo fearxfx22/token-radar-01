@@ -188,24 +188,39 @@ function openDetail(slug, push = true) {
   // must equal the implied value the board carries.
   const recomputed = Math.max(1, Math.round(r.tvl_usd * r.fitted_multiple * r.launch_odds));
   const agree = recomputed === r.implied_value_usd;
-  // Where the fitted multiple comes from: the line fitted on the snapshot's
-  // live market, evaluated at this protocol's TVL. A bigger TVL gets a
-  // smaller multiple, because the market pays less per TVL dollar for the
-  // biggest protocols: the fitted slope is D.fit.beta1.
-  const atMedian = Math.exp(D.fit.beta0);
-  const multipleNote = `<p>The fitted multiple ${r.fitted_multiple.toFixed(4)} comes from a line fitted on ${D.fit.n} live protocols with a market cap: ln(market cap / TVL) = ${D.fit.beta0} + ${D.fit.beta1} × (ln TVL − ${D.fit.median_log_tvl}). At the median TVL ($${D.fit.median_tvl_usd.toLocaleString('en-US')}) the multiple is ${atMedian.toFixed(4)}; at this protocol's TVL of ${moneyFull(r.tvl_usd)} it is ${r.fitted_multiple.toFixed(4)}. The line's residual spread is ${D.fit.residual_sd} and its R² is ${D.fit.r_squared}, so most of the multiple is still idiosyncratic: the fit is a pricing rule, not a prediction.</p>`;
-  // Where the launch odds come from: the category's eventual launch share
-  // and this protocol's age band, both from peer history in the snapshot.
-  const oddsRow = D.odds_by_category.find((c) => c.category === (r.category ?? 'Uncategorized'));
+  // Where the fitted multiple comes from: the ridge fitted on the snapshot's
+  // live market, evaluated at this protocol's own figures. Every term is
+  // shown, so the multiple can be checked against the row: the fitted
+  // slope on ln TVL is below 1, so a bigger TVL gets a smaller multiple.
+  const chg = Math.min(100, Math.max(-30, r.change_7d ?? 0));
+  const feats = [1, Math.log(r.tvl_usd), Math.log((r.age_days ?? 0) + 1), chg, Math.log(Math.max(1, r.chains.length))];
+  for (const c of D.fit.ridge_categories) feats.push(r.category === c ? 1 : 0);
+  const predLogMcap = feats.reduce((s, v, j) => s + v * D.fit.ridge_beta[j], 0);
+  const recomputedMultiple = Math.exp(predLogMcap - Math.log(r.tvl_usd));
+  const shown = [
+    `intercept ${D.fit.ridge_beta[0].toFixed(4)}`,
+    `ln TVL ${Math.log(r.tvl_usd).toFixed(2)} × ${D.fit.ridge_beta[1].toFixed(4)}`,
+    `ln(age + 1) ${Math.log((r.age_days ?? 0) + 1).toFixed(2)} × ${D.fit.ridge_beta[2].toFixed(4)}`,
+    `7-day change ${chg.toFixed(1)} × ${D.fit.ridge_beta[3].toFixed(4)}`,
+    `ln chains ${Math.log(Math.max(1, r.chains.length)).toFixed(2)} × ${D.fit.ridge_beta[4].toFixed(4)}`,
+  ];
+  const catIdx = D.fit.ridge_categories.indexOf(r.category ?? '');
+  if (catIdx >= 0) shown.push(`is ${r.category} × ${D.fit.ridge_beta[5 + catIdx].toFixed(4)}`);
+  const multipleNote = `<p>The fitted multiple ${r.fitted_multiple.toFixed(4)} comes from a ridge fitted on ${D.fit.n} live protocols with a market cap (penalty λ = ${D.fit.ridge_lambda}): ln(market cap) = ${shown.join(' + ')}, which at this protocol's figures gives ln(market cap) ${predLogMcap.toFixed(2)} and a multiple of ${recomputedMultiple.toFixed(4)}. The 7-day change is clipped to [−30%, +100%], so one wild week cannot dominate the multiple. The fit's residual spread is ${D.fit.residual_sd} and its R² is ${D.fit.r_squared}, so most of the multiple is still idiosyncratic: the fit is a pricing rule, not a prediction.</p>`;
+  // Where the launch odds come from: the saturating launch curve fitted on
+  // all 758 protocols. The forward odds are (Finf − F(age)) / (1 − F(age)),
+  // where F(age) = Finf × (1 − exp(−age / tau)).
   const ageBand = r.age_days === null ? 'unknown' : r.age_days < 365 ? 'under a year' : r.age_days < 1095 ? 'one to three years' : 'over three years';
-  const oddsNote = oddsRow
-    ? `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a ${esc(r.category ?? 'Uncategorized')} protocol listed ${ageBand} ago ever launches a token: among comparable protocols, ${Math.round(oddsRow.eventual_share * 100)}% eventually launch, and the share already launched by this age band is subtracted. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`
-    : `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a protocol listed ${ageBand} ago ever launches a token, from peer history in the snapshot. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`;
+  const finf = D.model.saturating_finf;
+  const tau = D.model.saturating_tau;
+  const fAge = finf * (1 - Math.exp(-(r.age_days ?? 0) / tau));
+  const oddsNote = `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a protocol listed ${ageBand} ago ever launches a token. Among all 758 protocols, the share that have launched by age <em>a</em> follows F(<em>a</em>) = ${finf} × (1 − exp(−<em>a</em> / ${tau} days)); at this protocol's age of ${r.age_days} days, F = ${fAge.toFixed(2)} have already launched, so the forward odds are (${finf} − ${fAge.toFixed(2)}) ÷ (1 − ${fAge.toFixed(2)}) = ${r.launch_odds.toFixed(2)}. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`;
   // What could be wrong: honest flags from the row's own figures, so the
   // implied value is read with its uncertainty attached.
   const flags = [];
   if (r.launch_odds <= 0.35) flags.push(`Only about ${Math.round(r.launch_odds * 100)}% of comparable protocols ever launch a token, so most of the value-if-launched is discounted away.`);
-  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing. The model does not use the 7-day change: it was unstable across time, so it is shown as a fact, not priced.`);
+  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing. The model prices the 7-day change, clipped to [−30%, +100%], so one wild week cannot dominate the multiple.${r.change_7d < -30 ? ' This week’s move is clipped to −30% in the model.' : ''}`);
+  if (r.change_7d !== null && r.change_7d > 100) flags.push(`TVL rose ${r.change_7d.toFixed(1)}% in the last 7 days — an extreme weekly move, clipped to +100% in the model, so it cannot dominate the multiple.`);
   if (r.change_7d === null) flags.push('No 7-day TVL figure is recorded for this protocol.');
   if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago, a short record, so the launch odds rest on very little history.`);
   const watch = flags.length
@@ -280,6 +295,17 @@ function renderDiagram() {
   el.innerHTML = svg;
   el.setAttribute('aria-label', chain);
 }
+
+// The launch-odds table in the method section, from the data: the twelve
+// categories with the most pre-token protocols, with each category's
+// median forward odds and eventual launch share.
+function renderOddsTable() {
+  const el = $('odds-rows');
+  if (!el) return;
+  el.innerHTML = D.odds_by_category.slice(0, 12).map((c) => `
+  <tr><td>${esc(c.category)}</td><td class="num">${c.n_pre}</td><td class="num">${c.median_odds.toFixed(2)}</td><td class="num">${c.eventual_share.toFixed(2)}</td></tr>`).join('');
+}
 renderDiagram();
+renderOddsTable();
 
 applyHash();
