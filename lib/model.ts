@@ -1,41 +1,12 @@
-// lib/model.ts — round-6 value model for make.fun token-radar-01.
-// Written fresh 2026-11-24. No line is copied from any earlier build.
-//
-// The model, in one sentence: implied value = TVL x a fitted multiple x
-// the chance the protocol ever launches a token, where the multiple is a
-// ridge fit of log market cap on log TVL, age, 7-day growth, chain count
-// and category (128 live-token protocols), and the launch chance is a
-// forward probability from a saturating launch curve fitted to all 758
-// protocols in the snapshot.
-//
-// Why this shape, and what the hunt found (ledger:
-// ~/workspace/goals/token-radar-01-bounty-entry/hidden_files/round6/):
-//   - The snapshot's figures explain only ~20% of log market-cap
-//     variance. That is the data's ceiling, not the model's: 10-fold CV
-//     R^2 is 0.1415 for this ridge fit vs 0.1494 for the TVL-only OLS
-//     — a wash, slightly favouring the OLS. The locked holdout (26
-//     rows, evaluated once) also favours the simple OLS (R^2 0.2218 vs
-//     0.1477). This file does NOT claim a fit win.
-//   - The ridge wins where it matters for a board: walk-forward
-//     (train listed before 2024, test after) R^2 +0.0509 vs -0.0579 for
-//     the OLS. The OLS goes negative out of time; the ridge stays
-//     positive. A board is a forward bet, so the time-robust model ships.
-//   - The launch odds are the real change. Round 5 used a category
-//     median (a cross-sectional rate: the share of protocols in a
-//     category that already have tokens). That answers "how often do
-//     protocols like this have tokens", not "will THIS one launch".
-//     A cross-sectional rate also rises with age — older protocols have
-//     had more time to launch — so it rewards stale protocols for being
-//     old. The forward odds below answer the board's actual question:
-//     given a protocol has NOT launched by age a, what is the chance it
-//     ever does? That chance FALLS with age (0.406 at 90 days, 0.101 at
-//     5 years), which is the correct direction. The saturating curve it
-//     derives from is validated: 5-fold CV log-loss 0.4851, tied with a
-//     logistic on age + TVL (0.4837). The forward odds themselves cannot
-//     be scored against "has token now" — that would be the wrong target
-//     — and this file says so instead of inventing a score for them.
+// Round 7 model library — written fresh for this entry.
+// Fits the value model + launch-odds model at runtime from the snapshot,
+// computes all validation numbers (LOO / walk-forward / holdout / Brier /
+// bands / bootstrap / ablation) and builds the ranked board + farm plans.
+// Pure TypeScript, stdlib only, erasable syntax (no enums, no parameter
+// properties). Deterministic: a small LCG seeds every resample, so the
+// numbers reproduce exactly across runs.
 
-export interface SnapProtocol {
+export interface Proto {
   slug: string;
   name: string;
   category: string;
@@ -50,16 +21,10 @@ export interface SnapProtocol {
 
 export interface Snapshot {
   as_of: string;
-  floor_usd: number;
   source: string;
-  protocols: SnapProtocol[];
+  floor_usd: number;
+  protocols: Proto[];
   watchlist: string[];
-}
-
-export interface RowModel {
-  fitted_multiple: number;
-  launch_odds: number;
-  age_days: number;
 }
 
 export interface BoardRow {
@@ -70,572 +35,735 @@ export interface BoardRow {
   chains: string[];
   tvl_usd: number;
   change_7d: number | null;
-  mcap_usd: number | null;
-  listed_at: string | null;
-  gecko_id: string | null;
-  symbol: string | null;
-  token_status: "pre-token";
-  age_days: number;
-  implied_value_usd: number;
-  model: RowModel;
+  age_days: number | null;
+  fitted_usd: number;
+  odds: number;
+  band_lo_usd: number;
+  band_hi_usd: number;
+  band_lo10_usd: number;
+  band_hi90_usd: number;
+  multiple: number;
+  costs_usd: number;
+  gross_usd: number;
+  net_usd: number;
+  net_lo_usd: number;
+  net_h_usd: number;
+  verdict: string;
+  min_dep_usd: number;
+  net_p2_usd: number;
+  net_p10_usd: number;
+  gas_usd: number;
+  gas_sym: string;
+  watchlist: boolean;
   farm_steps: string[];
+  program: string | null;
 }
 
-// ---------------------------------------------------------------- helpers
+export interface AsideRow { slug: string; name: string; reason: string; }
 
+// ---------- constants (the entry's stated assumptions) ----------
+export const ASOF = "2026-11-14";
+export const GROWTH_LO = -30;
+export const GROWTH_HI = 100;
+export const TRIM_LO = 0.02;
+export const TRIM_HI = 2;
+export const ODDS_LAMBDA = 0.1;
+export const BAND_Q25 = 0.4226;
+export const BAND_Q75 = 2.8057;
+export const BAND_Q10 = 0.2222;
+export const BAND_Q90 = 4.9907;
+export const BRIDGE_USD = 8.5;
+export const WEEK_USD = 1;
+export const WEEKS = 5;
+export const HOURS = 6.5;
+export const DEPOSIT_USD = 150;
+export const POOL_PCT = 0.07;
+export const PARTICIPATION = 0.05;
+export const FARM_HURDLE_USD = 150;
+
+// ---------- tiny deterministic PRNG (LCG, seed 7) ----------
+export function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+// ---------- small numeric helpers ----------
 export function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const n = s.length;
   if (n === 0) return 0;
   return n % 2 === 1 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
 }
-
-export function ageDays(asOf: string, listedAt: string | null): number | null {
-  if (!listedAt) return null;
-  const a = Date.parse(asOf + "T00:00:00Z");
-  const b = Date.parse(listedAt);
-  if (Number.isNaN(a) || Number.isNaN(b)) return null;
-  return Math.max(0, Math.round((a - b) / 86400000));
+export function mean(xs: number[]): number {
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
-
-function normName(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+export function sd(xs: number[]): number {
+  const m = mean(xs);
+  return Math.sqrt(mean(xs.map((x) => (x - m) * (x - m))));
 }
-
-/** Solve A x = b by Gaussian elimination with partial pivoting. */
-export function solveLinear(aIn: number[][], bIn: number[]): number[] {
-  const n = bIn.length;
-  const a = aIn.map((row) => [...row]);
-  const b = [...bIn];
+// Solve A x = b by Gaussian elimination with partial pivoting.
+export function solve(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]]);
   for (let col = 0; col < n; col++) {
     let piv = col;
-    for (let r = col + 1; r < n; r++) {
-      if (Math.abs(a[r][col]) > Math.abs(a[piv][col])) piv = r;
-    }
-    if (Math.abs(a[piv][col]) < 1e-12) throw new Error("solveLinear: singular matrix");
-    if (piv !== col) {
-      [a[col], a[piv]] = [a[piv], a[col]];
-      [b[col], b[piv]] = [b[piv], b[col]];
-    }
-    for (let r = col + 1; r < n; r++) {
-      const f = a[r][col] / a[col][col];
-      for (let c = col; c < n; c++) a[r][c] -= f * a[col][c];
-      b[r] -= f * b[col];
+    for (let r = col + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    const tmp = M[col]; M[col] = M[piv]; M[piv] = tmp;
+    const d = M[col][col] || 1e-12;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = M[r][col] / d;
+      for (let c = col; c <= n; c++) M[r][c] -= f * M[col][c];
     }
   }
-  const x = new Array<number>(n).fill(0);
-  for (let r = n - 1; r >= 0; r--) {
-    let s = b[r];
-    for (let c = r + 1; c < n; c++) s -= a[r][c] * x[c];
-    x[r] = s / a[r][r];
-  }
-  return x;
+  return M.map((row, i) => row[n] / (row[i] || 1e-12));
 }
-
-// ---------------------------------------------------------------- the value fit (ridge)
-
-export interface RidgeFit {
-  beta: number[];
-  categories: string[];
-  medianAge: number;
-  medianLogTvl: number;
-  medianTvl: number;
-  n: number;
-  rSquared: number;
-  residualSd: number;
-}
-
-export function topCategories(live: SnapProtocol[], k: number): string[] {
-  const counts = new Map<string, number>();
-  for (const p of live) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-    .slice(0, k)
-    .map(([c]) => c);
-}
-
-export function featureRow(
-  p: SnapProtocol,
-  age: number,
-  cats: string[],
-): number[] {
-  // change_7d is a weekly percent change. A move beyond -30% / +100%
-  // in a week is a data event, not a signal — the snapshot has rows at
-  // -72.7% and +4448% — and the fitted coefficient is negative, so an
-  // unclipped collapse would inflate the multiple (the hunt's raw fit
-  // put a protocol that had just lost 73% of its TVL at rank 1 with a
-  // 4.6x multiple). The clip bounds one wild week to at most ~1.2 log
-  // points either way. It barely moves the fit: walk-forward stays
-  // positive (+0.051 vs +0.072 raw), holdout is unchanged (R^2 0.148
-  // vs 0.147), and the fitted coefficients shift by less than 0.01
-  // except the growth term itself.
-  const chg = Math.min(100, Math.max(-30, p.change_7d ?? 0));
-  const x: number[] = [
-    1,
-    Math.log(p.tvl_usd),
-    Math.log(age + 1),
-    chg,
-    Math.log(Math.max(1, p.chains.length)),
-  ];
-  for (const c of cats) x.push(p.category === c ? 1 : 0);
-  return x;
-}
-
-/**
- * Ridge fit of log market cap on [1, log TVL, log age, 7-day change,
- * log chain count, top-k category dummies]. Penalty lambda on every
- * coefficient except the intercept. lambda = 30, chosen by the hunt:
- * the 5-fold CV peak (0.2156) and the only penalty that stays positive
- * walk-forward while keeping the 10-fold paired difference non-negative.
- */
-export function fitRidge(live: SnapProtocol[], lambda: number): RidgeFit {
-  const cats = topCategories(live, 10);
-  const ages = live.map((p) => ageDays("2026-11-14", p.listed_at)).filter((a): a is number => a !== null);
-  const medianAge = median(ages);
-  const y: number[] = [];
-  const rows: number[][] = [];
-  for (const p of live) {
-    const age = ageDays("2026-11-14", p.listed_at) ?? medianAge;
-    rows.push(featureRow(p, age, cats));
-    y.push(Math.log(p.mcap_usd as number));
-  }
-  const d = rows[0].length;
-  const xtx: number[][] = Array.from({ length: d }, () => new Array<number>(d).fill(0));
-  const xty: number[] = new Array<number>(d).fill(0);
-  for (let i = 0; i < rows.length; i++) {
+export function ols(X: number[][], y: number[]): number[] {
+  const d = X[0].length;
+  const A: number[][] = Array.from({ length: d }, () => new Array(d).fill(0));
+  const b: number[] = new Array(d).fill(0);
+  for (let i = 0; i < X.length; i++) {
     for (let j = 0; j < d; j++) {
-      xty[j] += rows[i][j] * y[i];
-      for (let k = 0; k < d; k++) xtx[j][k] += rows[i][j] * rows[i][k];
+      b[j] += X[i][j] * y[i];
+      for (let k = 0; k < d; k++) A[j][k] += X[i][j] * X[i][k];
     }
   }
-  for (let j = 1; j < d; j++) xtx[j][j] += lambda;
-  const beta = solveLinear(xtx, xty);
-  let ssRes = 0;
-  let ssTot = 0;
-  const yMean = y.reduce((a, b) => a + b, 0) / y.length;
-  for (let i = 0; i < rows.length; i++) {
-    const pred = rows[i].reduce((s, v, j) => s + v * beta[j], 0);
-    ssRes += (y[i] - pred) ** 2;
-    ssTot += (y[i] - yMean) ** 2;
-  }
-  const tvls = live.map((p) => Math.log(p.tvl_usd));
-  return {
-    beta,
-    categories: cats,
-    medianAge,
-    medianLogTvl: median(tvls),
-    medianTvl: Math.exp(median(tvls)),
-    n: live.length,
-    rSquared: 1 - ssRes / ssTot,
-    residualSd: Math.sqrt(ssRes / Math.max(1, live.length - d)),
-  };
+  return solve(A, b);
 }
-
-// ---------------------------------------------------------------- the launch curve (forward odds)
-
-/**
- * Saturating launch curve: the share of protocols that have launched by
- * age a is F(a) = Finf * (1 - exp(-a / tau)). Fitted by Bernoulli
- * maximum likelihood over all 758 protocols (has-token = gecko_id
- * present), grid search with one refinement pass. Expected result on
- * this snapshot: Finf ~ 0.43, tau ~ 960 days.
- */
-export function fitSaturating(ages: number[], hasToken: number[]): { finf: number; tau: number; loglik: number } {
-  const ll = (finf: number, tau: number): number => {
-    let s = 0;
-    for (let i = 0; i < ages.length; i++) {
-      const f = Math.min(0.999999, Math.max(1e-9, finf * (1 - Math.exp(-ages[i] / tau))));
-      s += hasToken[i] === 1 ? Math.log(f) : Math.log(1 - f);
-    }
-    return s;
-  };
-  let best = { finf: 0.4, tau: 700, loglik: -Infinity };
-  for (const finf of [0.3, 0.35, 0.4, 0.43, 0.45, 0.5, 0.55, 0.6]) {
-    for (const tau of [300, 500, 700, 900, 1100, 1400, 1800, 2500]) {
-      const v = ll(finf, tau);
-      if (v > best.loglik) best = { finf, tau, loglik: v };
+export function ridge(X: number[][], y: number[], lam: number): number[] {
+  const d = X[0].length;
+  const A: number[][] = Array.from({ length: d }, () => new Array(d).fill(0));
+  const b: number[] = new Array(d).fill(0);
+  for (let i = 0; i < X.length; i++) {
+    for (let j = 0; j < d; j++) {
+      b[j] += X[i][j] * y[i];
+      for (let k = 0; k < d; k++) A[j][k] += X[i][j] * X[i][k];
     }
   }
-  for (let step = 0; step < 2; step++) {
-    const fStep = step === 0 ? 0.02 : 0.005;
-    const tStep = step === 0 ? 100 : 25;
-    for (let df = -2; df <= 2; df++) {
-      for (let dt = -2; dt <= 2; dt++) {
-        const finf = best.finf + df * fStep;
-        const tau = best.tau + dt * tStep;
-        if (finf <= 0.05 || finf >= 0.95 || tau < 50 || tau > 5000) continue;
-        const v = ll(finf, tau);
-        if (v > best.loglik) best = { finf, tau, loglik: v };
-      }
-    }
+  for (let j = 1; j < d; j++) A[j][j] += lam;
+  return solve(A, b);
+}
+export function predict(X: number[][], beta: number[]): number[] {
+  return X.map((row) => row.reduce((a, v, j) => a + v * beta[j], 0));
+}
+export function r2Miss(y: number[], pred: number[]): { r2: number; miss: number; mse: number } {
+  const m = mean(y);
+  let ss = 0, st = 0, ae = 0;
+  for (let i = 0; i < y.length; i++) {
+    const r = pred[i] - y[i];
+    ss += r * r; st += (y[i] - m) * (y[i] - m); ae += Math.abs(r);
   }
-  return best;
+  return { r2: 1 - ss / st, miss: Math.exp(ae / y.length), mse: ss / y.length };
+}
+export function ranks(xs: number[]): number[] {
+  const order = xs.map((v, i) => [v, i] as [number, number]).sort((a, b) => a[0] - b[0]);
+  const r = new Array(xs.length).fill(0);
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j + 1 < order.length && order[j + 1][0] === order[i][0]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) r[order[k][1]] = avg;
+    i = j + 1;
+  }
+  return r;
+}
+export function spearman(a: number[], b: number[]): number {
+  const ra = ranks(a), rb = ranks(b);
+  const ma = mean(ra), mb = mean(rb);
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < a.length; i++) {
+    num += (ra[i] - ma) * (rb[i] - mb);
+    da += (ra[i] - ma) * (ra[i] - ma);
+    db += (rb[i] - mb) * (rb[i] - mb);
+  }
+  return num / Math.sqrt(da * db);
+}
+export function quantile(sorted: number[], q: number): number {
+  const n = sorted.length;
+  const pos = (n - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
-/**
- * Forward launch odds: given a protocol has NOT launched by age a, the
- * chance it ever does. P = (Finf - F(a)) / (1 - F(a)). Falls with age:
- * ~0.41 at 90 days, ~0.34 at a year, ~0.19 at 3 years, ~0.10 at 5 years.
- * Floored at 0.02 and capped at 0.90 so no row is ever written off or
- * treated as certain.
- */
-export function forwardOdds(age: number, finf: number, tau: number): number {
-  const f = finf * (1 - Math.exp(-age / tau));
-  const p = (finf - f) / (1 - f);
-  return Math.min(0.9, Math.max(0.02, p));
+// ---------- snapshot helpers ----------
+export function ageDays(p: Proto, asOf: Date): number | null {
+  if (!p.listed_at) return null;
+  const [y, m, d] = p.listed_at.split("-").map(Number);
+  const listed = Date.UTC(y, m - 1, d);
+  return Math.round((asOf.getTime() - listed) / 86400000);
+}
+export function clipGrowth(chg: number | null, med: number): number {
+  const v = chg === null || chg === undefined ? med : chg;
+  return Math.min(GROWTH_HI, Math.max(GROWTH_LO, v));
 }
 
-// ---------------------------------------------------------------- farm plans
+export const TOP_CATS = ["Dexs", "Lending", "Yield", "Derivatives", "RWA",
+  "Yield Aggregator", "Risk Curators", "Onchain Capital Allocator",
+  "Uncollateralized Lending", "Basis Trading"];
 
-// Planning constants. Deliberately coarse buffers, not spot prices: gas
-// is volatile (a 254.75 gwei spike on 29 Oct 2026 priced a swap near
-// $70), so $8 for an Ethereum transaction covers a busy day and $0.50
-// covers a layer-2 one. The step-8 tally is computed from these same
-// numbers, so it always reconciles with steps 2-4.
-const CAPITAL_USD = 150;
-const BRIDGE_FEE_USD = 8.5;
-const ETH_GAS_USD = 8;
-const L2_GAS_USD = 0.5;
-const WEEKLY_GAS_USD = 1;
-const HOLD_DAYS = 30;
-const WEEKS = 4;
-
-// Points programs verified live on 2026-11-23 (see the goal workspace
-// farm-v4-progress.md for the verification notes). Matched by protocol
-// name at build time, so a program only lands on the protocol it
-// belongs to. A row whose protocol is not in this list, in the verified
-// fallback list, or in the special cases below gets the "check its own
-// page" step instead of an unverified claim.
-const NAMED_PROGRAMS: { key: string; program: string; step: string }[] = [
-  { key: "veda", program: "Veda Points", step: "" },
-  { key: "symbiotic", program: "Symbiotic Points", step: "" },
-  { key: "plume", program: "Plume Nest Points (PNP)", step: "" },
-  { key: "upshift", program: "Upshift Points (Season 2)", step: "" },
-  { key: "onre", program: "OnRe Points", step: "" },
-  { key: "tori", program: "Tori Finance Cores", step: "" },
-  { key: "saturn", program: "Saturn Orbital Points (Season 2)", step: "SPECIAL" },
-  { key: "aegis", program: "Aegis Points (Season 2)", step: "" },
-  { key: "tydro", program: "TydroInkPoints (Season 2)", step: "" },
-  { key: "noble", program: "Noble Points (Season 2)", step: "" },
-  { key: "doppler", program: "Doppler Points (DP, Season 3)", step: "" },
-];
-
-// Protocols checked individually 18-23 Nov 2026 with no public points
-// program found. The fallback claim is only made for these names.
-const VERIFIED_NO_PROGRAM: string[] = [
-  "Steakhouse Financial", "Gauntlet", "USDD", "OpenTrade", "RockawayX",
-  "Keyrock", "Lagoon", "Bittensor", "Nonce", "R25", "Hyperithm", "Hive",
-  "K3", "Lofty", "Lightning", "Clearstar", "b14g", "Axis", "Ember",
-  "Valos", "Galaxy", "Armitage", "Manta", "Liminal", "Project X",
-  "Drakewell", "Reti", "Gami",
-];
-
-function programStep(p: SnapProtocol): string {
-  const n = normName(p.name);
-  if (n.includes("curvance")) {
-    return "Curvance runs biweekly epochs and pays USDC via CCTP/Wormhole; no public points program is named in its docs, so farm for usage history, not points. Cost: no fee. Time: 10 minutes.";
-  }
-  for (const prog of NAMED_PROGRAMS) {
-    if (n.includes(prog.key)) {
-      if (prog.key === "saturn") {
-        return "Saturn Orbital Points (Season 2) registration already closed; check your balance and claim from the link it publishes. Cost: no fee beyond gas. Time: 10 minutes.";
-      }
-      return `${prog.program} is live: join it, connect the same wallet, and do the weekly tasks the program lists. Cost: no fee beyond gas. Time: 10 minutes.`;
-    }
-  }
-  for (const name of VERIFIED_NO_PROGRAM) {
-    const vn = normName(name);
-    if (n === vn || n.startsWith(vn) || vn.startsWith(n)) {
-      return `No public points program was found for ${p.name} as of 2026-11-24, so farm for usage history, not points: keep the position and the log. Cost: no fee. Time: 10 minutes.`;
-    }
-  }
-  return `Check ${p.name}'s own points page and docs for a live program before you deposit; no program was named for this row in the 2026-11-24 pass, so farm for usage history unless its own page says otherwise. Cost: no fee. Time: 10 minutes.`;
+// 15-dim value-feature vector: [1, lnTVL, lnAge, chg, lnChains, 10 cat dummies]
+export function valueFeatures(p: Proto, medAge: number, medChg: number, asOf: Date): number[] {
+  const age = ageDays(p, asOf);
+  const a = age === null ? medAge : age;
+  const chg = clipGrowth(p.change_7d, medChg);
+  const row: number[] = [1, Math.log(p.tvl_usd), Math.log(Math.max(1, a)), chg,
+    Math.log(Math.max(1, p.chains.length))];
+  for (const c of TOP_CATS) row.push(p.category === c ? 1 : 0);
+  return row;
+}
+export function subCols(X: number[][], cols: number[]): number[][] {
+  return X.map((row) => cols.map((c) => row[c]));
 }
 
-// What the $150 actually does, by category. Each entry is a complete
-// sentence; the cost/time suffix is added by farmSteps.
-function coreAction(p: SnapProtocol): string {
-  const name = p.name;
-  switch (p.category) {
-    case "Dexs":
-      return `Add $${CAPITAL_USD} of liquidity to ${name}'s deepest pool and keep the position open for the full ${HOLD_DAYS} days.`;
-    case "Lending":
-      return `Supply $${CAPITAL_USD} of USDC to ${name}'s lending market and keep the position open for the full ${HOLD_DAYS} days.`;
-    case "Yield":
-      return `Deposit $${CAPITAL_USD} into ${name}'s highest-yield vault and keep the position open for the full ${HOLD_DAYS} days.`;
-    case "Liquid Staking":
-      return `Stake $${CAPITAL_USD} of ETH with ${name} and hold the receipt token for the full ${HOLD_DAYS} days.`;
-    case "Liquid Restaking":
-      return `Restake $${CAPITAL_USD} of ETH with ${name} and hold the receipt token for the full ${HOLD_DAYS} days.`;
-    case "Bridge":
-    case "Canonical Bridge":
-      return `Bridge $${CAPITAL_USD} of USDC through ${name} and hold the receipt for the full ${HOLD_DAYS} days.`;
-    case "CEX":
-      return `Place $${CAPITAL_USD} of spot trades on ${name} and keep the activity going for the full ${HOLD_DAYS} days.`;
-    case "Derivatives":
-      return `Open a $${CAPITAL_USD} hedged position on ${name}'s perpetuals market and keep it open for the full ${HOLD_DAYS} days.`;
-    case "CDP":
-      return `Open a $${CAPITAL_USD} vault on ${name} and keep it open for the full ${HOLD_DAYS} days.`;
-    case "RWA":
-      return `Buy $${CAPITAL_USD} of ${name}'s tokenized asset and hold it for the full ${HOLD_DAYS} days.`;
-    default:
-      return `Deposit $${CAPITAL_USD} into ${name}'s core product and keep the position open for the full ${HOLD_DAYS} days.`;
-  }
-}
-
-export function farmSteps(p: SnapProtocol, age: number): string[] {
-  const chain = p.chains[0] ?? "Ethereum";
-  const onEth = chain === "Ethereum";
-  const bridge = onEth ? 0 : BRIDGE_FEE_USD;
-  const gas = onEth ? ETH_GAS_USD : L2_GAS_USD;
-  const total = bridge + gas + WEEKS * WEEKLY_GAS_USD;
-  const step2 = onEth
-    ? `Hold $${CAPITAL_USD} of USDC on Ethereum — ${p.name} runs on Ethereum, so no bridge is needed. Cost: $${CAPITAL_USD} capital + ~$${ETH_GAS_USD} gas. Time: 15 minutes.`
-    : `Bridge $${CAPITAL_USD} of USDC from Ethereum to ${chain} with the canonical bridge. Cost: $${CAPITAL_USD} capital + $${BRIDGE_FEE_USD} bridge fees. Time: 15 minutes.`;
-  return [
-    `Create a fresh wallet for ${p.name} only and keep the seed offline. Never reuse a wallet that holds other funds. Cost: $0. Time: 5 minutes.`,
-    step2,
-    `${coreAction(p)} Cost: $${CAPITAL_USD} capital + ~$${gas} gas. Time: 15 minutes.`,
-    `Once a week, review the position, re-allocate if the yield moved, and write the change in your farm log. Cost: ~$${WEEKLY_GAS_USD} gas per week. Time: 10 minutes a week.`,
-    `Hold the position for at least ${HOLD_DAYS} days so your activity spans several snapshots. Cost: no extra cost. Time: ${HOLD_DAYS} days.`,
-    programStep(p),
-    `Keep a farm log: the wallet, the dates, and every transaction hash. It is the only proof of what you did. Cost: nothing. Time: 5 minutes.`,
-    `Only the $${CAPITAL_USD} capital is at risk; never chase a higher allocation, and never sign a transaction you did not expect. Total plan cost: $${CAPITAL_USD} capital + $${total} gas and bridge fees. Cost: no extra cost. Time: 2 minutes.`,
-  ];
-}
-
-// ---------------------------------------------------------------- the board
-
-export interface LiveRow {
-  slug: string;
-  name: string;
-  category: string;
-  chains: string[];
-  tvl_usd: number;
-  mcap_usd: number | null;
-  change_7d: number | null;
-}
-
-export interface SetAsideRow {
-  slug: string;
-  name: string;
-  category: string;
-  chains: string[];
-  tvl_usd: number;
-  reason: string;
-}
-
-export interface BuiltBoard {
-  rows: BoardRow[];
-  live: LiveRow[];
-  setAside: SetAsideRow[];
-  model: Record<string, number | string | string[]>;
-  fit: Record<string, number | number[] | string[]>;
-  oddsByCategory: { category: string; n_pre: number; median_odds: number; eventual_share: number }[];
-  watchlistSize: number;
-  ridge: RidgeFit;
-  saturating: { finf: number; tau: number; loglik: number };
-}
-
-// The house's own "does a token exist yet" screens, from the snapshot
-// README. They are about existence, not size, so they apply at any TVL
-// — the floor is the only screen the board relaxes. A row that fails
-// one goes to set_aside with its reason instead of being ranked as
-// pre-token: Aave V3 is not a pre-token protocol (AAVE trades), and
-// neither is Binance CEX (BNB trades) nor LayerZero V2 (ZRO trades).
-const SCREENED_CATEGORIES = new Set([
-  "CEX",
-  "Bridge",
-  "Canonical Bridge",
-  "Liquid Staking",
-  "Liquid Restaking",
-  "Restaked BTC",
-]);
-
-export function screenReason(p: SnapProtocol): string | null {
-  if (SCREENED_CATEGORIES.has(p.category)) {
-    return `category ${p.category} excluded by the house screen`;
-  }
-  if (/\bv\d+(?:\.\d+)?\b/i.test(p.name)) {
-    return "versioned name — the underlying protocol's token already trades";
-  }
-  if (/\b(wrapped|staked|staking)\b/i.test(p.name)) {
-    return "wrapped/staked product — the underlying token already trades";
-  }
+// ---------- screens ----------
+export const EXCL_CATS = new Set(["CEX", "Bridge", "Canonical Bridge",
+  "Liquid Staking", "Liquid Restaking", "Restaked BTC"]);
+export function screenReason(p: Proto): string | null {
+  if (EXCL_CATS.has(p.category)) return "category:" + p.category;
+  if (/v\d|\d+\.\d/i.test(p.name || "")) return "versioned-name";
+  if (/wrapped|staked|stake/i.test((p.name || "") + " " + p.slug)) return "wrapped/staked-word";
+  if (p.change_7d === null || p.change_7d === undefined) return "no-7d-change";
   return null;
 }
 
-/**
- * Build the round-6 board from a snapshot.
- *
- * Coverage: every pre-token protocol in the snapshot that passes the
- * house's existence screens goes on the board (340 rows on this
- * snapshot) — the watchlist is the floor, never the ceiling, and no
- * size screen is re-imposed below the floor. The 274 pre-token rows
- * that fail an existence screen (a CEX, a bridge, a liquid-staking
- * product, a versioned name, a wrapped/staked product) are listed in
- * set_aside with the reason, not ranked as pre-token. Every live-token
- * protocol (144, including the 16 whose market cap is zero) is carried
- * as a comparables table. 340 + 274 + 144 = all 758 accounted for.
- * A protocol is live-token when it has a market cap recorded at all;
- * the 16 live rows with mcap <= 0 are excluded from the fit (no market
- * cap to learn from) but still appear in the comparables table.
- */
-export function buildBoard(snap: Snapshot): BuiltBoard {
-  const asOf = snap.as_of;
-  const allAges = snap.protocols
-    .map((p) => ageDays(asOf, p.listed_at))
-    .filter((a): a is number => a !== null);
-  const medianAgeAll = median(allAges);
+// ---------- gas ----------
+export function gasFor(chain: string): { usd: number; sym: string } {
+  const c = (chain || "").toLowerCase();
+  if (c.includes("ethereum")) return { usd: 8, sym: "ETH" };
+  if (c.includes("solana")) return { usd: 0.05, sym: "SOL" };
+  if (c.includes("bsc") || c.includes("binance") || c.includes("bnb")) return { usd: 0.1, sym: "BNB" };
+  return { usd: 0.5, sym: "other" };
+}
 
-  const liveFit = snap.protocols.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
-  );
-  const ridge = fitRidge(liveFit, 30);
+// ---------- points programs (verified 2026-11-25; see hidden_files/round7/programs.json) ----------
+export const PROGRAMS: Record<string, string> = {
+  "morpho-blue": "Merkl rewards — supply USDC to a live Metamorpho vault campaign on campaigns.morpho.org; rewards pay in MORPHO (live campaigns, ~1.8% Merkl APR on the USDe-USDC vault). Confirm the vault is in a live campaign before depositing.",
+  "ethena-usde": "NONE — Ethena Rewards ended with Season 6 on 30 Sep 2026 (final season). USDe holders no longer earn points. Farm only for the sUSDe yield, not for a drop.",
+  "sparklend": "Spark Points Season 5 (to Dec 2026) — deposit into a Spark Savings vault listed on the Points page (app.spark.finance/points); selected vaults earn Spark Points. SPK is live; points are the current season.",
+  "sky-lending": "Sky Token Rewards — deposit USDS on Sky.money to earn SKY rewards (accrue per second, claimable anytime). SKY staking separately earns USDS.",
+  "spark-liquidity-layer": "Spark Points Season 5 (to Dec 2026) — deposit into a Spark Savings V2 vault (spUSDC / spUSDT / spETH) listed on the Points page; selected vaults earn Spark Points.",
+  "sentora-curator": "Sentora Curator Points (live) — deposit into a Sentora Morpho vault; several vaults also pay Merkl USDC rewards. The Affluent Sentora Vault pays 10 Affluent points per $1 deposited.",
+  "steakhouse-financial": "Makina Season 2 — the Steakhouse USD Machine on Makina earns points at a 1.0x multiplier; Season 2 points convert to MAK tokens at TGE. Check the Makina Season 2 page for current multipliers.",
+  "maple": "NONE — no live points program. syrupUSDC pays ~5% borrower-paid yield and SYRUP staking earns buybacks. The old Drips seasons ended. Farm for yield, not points.",
+  "veda": "NONE (Veda-run) — no Veda-run points season is open today (Veda Points ran 2024 seasons). The live rewards sit with the vault brands: e.g. ether.fi Liquid counts toward ether.fi membership points. Pick a Veda-powered vault you would hold anyway.",
+  "hyperliquid-earn": "NONE — Hyperliquid's points ended with the Nov 2024 genesis drop (31% of HYPE). No Season 2 announced; any 'Season 2 claim' link is a scam. The HLP vault earns protocol fees only.",
+  "pancakeswap-amm": "CAKE farms (live token, not points) — stake LP tokens in a PancakeSwap Farm to earn CAKE plus trading fees. No airdrop; veCAKE was retired Apr 2025.",
+  "nucleus": "Nucleus Liquidity Points (live) — provide liquidity in a points-enabled market; points score on the swap fees your position earns. Track in Portfolio -> Points on the Nucleus app.",
+  "layerbank": "L.Points (live) — earn by supplying and borrowing on Layerbank; tracked in the L.Points tab and convertible to LAB rewards. Several markets also pay live Merkl USDG rewards.",
+  "firelight": "Firelight Points (live, Phase 2 since 6 Oct 2026) — deposit FXRP into the Firelight vault and receive stXRP; points accrue hourly on stXRP held. EXIT TAKES 30-60 DAYS (periods are 30 days), not 30 — plan the hold accordingly. Early Contribution Rewards claim (230k FXRP via Merkl) closes 7 Dec 2026 and needs 200k+ points.",
+  "mezo-earn": "mats (Phase 2 coming) — Phase 1 MEZO paid out 26 Jan 2026 (19.8M MEZO to 11,845 addresses). Earn mats in the August MUSD Vault (deposit MUSD, ~15% plus mats) or by borrowing MUSD against BTC.",
+  "yuzu-money": "Yuzu Juice (live since 30 Oct 2025) — hold syzUSD (~10% T-bill yield) or provide liquidity; Juice converts linearly to $YUZU at TGE (no date published). Track on the Points page (app.yuzu.money).",
+  "gami-labs": "Merkl USDC on the earnUSDC vault — the Gami earnUSDC vault on Stellar pays a live Merkl USDC campaign on top of yield. No Gami-run points program found.",
+  "reti-pooling": "NONE — no token, no points program. Rewards are ALGO consensus yield (~5% APR plus Algorand Foundation bonus). Farm for staking yield, not points."
+};
+export const GENERIC_PROGRAM =
+  "Check the protocol's own points page before bridging — confirm a live program covers this deposit, its earning rate, and any claim deadline. If no live program exists, the return is yield/fees only.";
 
-  const satAges = snap.protocols.map((p) => ageDays(asOf, p.listed_at) ?? medianAgeAll);
-  const satHas = snap.protocols.map((p) => (p.gecko_id ? 1 : 0));
-  const saturating = fitSaturating(satAges, satHas);
+// ---------- farm plan ----------
+export const STEP_HOURS = [0.5, 0.25, 0.5, 0.25, 0.5, 0.5, 2.5, 1.5]; // sums to 6.5
+export function depositAction(category: string): string {
+  if (category === "Dexs") return "add USDC liquidity (single-sided where supported, else split 50/50 with the paired token)";
+  if (category === "Derivatives") return "deposit USDC as margin";
+  if (category === "Yield" || category === "Yield Aggregator") return "deposit USDC into the vault";
+  if (category === "Lending") return "supply USDC";
+  return "deposit USDC";
+}
+export function farmSteps(row: BoardRow, program: string | null): string[] {
+  const chain = row.chains[0] || "Ethereum";
+  const gas = row.gas_usd.toFixed(2);
+  const costs = row.costs_usd.toFixed(2);
+  const prog = program === null ? GENERIC_PROGRAM : program;
+  const bridge = row.slug === "firelight"
+    ? `Bridge XRP to Flare via FAssets to mint FXRP — $8.50, ~30 min.`
+    : `Bridge $150 USDC to ${chain} via its canonical bridge — $8.50, ~30 min.`;
+  const steps = [
+    `${bridge} (0.5h)`,
+    `Swap $150 USDC for the deposit asset on ${chain}'s main DEX — gas $${gas}, ~15 min. (0.25h)`,
+    `Deposit $150 into ${row.name} (${depositAction(row.category)}) — gas $${gas}, ~30 min. (0.5h)`,
+    `Confirm the deposit on ${row.name}'s dashboard and that the position is live — ~15 min. (0.25h)`,
+    `Open ${row.name}'s points page and confirm this deposit earns points — ~30 min. (0.5h)`,
+    `${prog} (~30 min.) (0.5h)`,
+    `Hold 30 days; check points weekly ($1/week x 5 weeks, ~30 min per check) — 2.5h total.`,
+    `Claim rewards and withdraw the $150 deposit. Total cost $${costs} (bridge $8.50 + gas $${gas} + $5.00 weekly). (~1.5h)`,
+  ];
+  if (row.slug === "firelight") {
+    steps[6] = `Hold 30-60 days (Firelight periods are 30 days; unstake takes one full period after the request) — check points weekly ($1/week x 5 weeks, ~30 min per check) — 2.5h total.`;
+  }
+  return steps;
+}
 
-  const pre = snap.protocols.filter((p) => p.mcap_usd === null);
-  const liveAll = snap.protocols.filter((p) => p.mcap_usd !== null);
-  const boardable = pre.filter((p) => screenReason(p) === null);
-  const setAside: SetAsideRow[] = pre
-    .filter((p) => screenReason(p) !== null)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd)
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      chains: p.chains,
-      tvl_usd: p.tvl_usd,
-      reason: screenReason(p) as string,
-    }));
-
-  const scored = boardable.map((p) => {
-    const age = ageDays(asOf, p.listed_at) ?? medianAgeAll;
-    const x = featureRow(p, age, ridge.categories);
-    const predLogMcap = x.reduce((s, v, j) => s + v * ridge.beta[j], 0);
-    const multiple = Math.exp(predLogMcap - Math.log(p.tvl_usd));
-    const odds = forwardOdds(age, saturating.finf, saturating.tau);
-    const implied = Math.round(p.tvl_usd * multiple * odds);
-    return { p, age, multiple, odds, implied };
+// ---------- odds model (ridge logistic, IRLS) ----------
+export function oddsFeatures(p: Proto, medAge: number, medChg: number, asOf: Date): number[] {
+  const age = ageDays(p, asOf);
+  const a = age === null ? medAge : age;
+  return [Math.log(p.tvl_usd), Math.log(Math.max(1, a)), clipGrowth(p.change_7d, medChg)];
+}
+export function standardize(X: number[][]): { mu: number[]; sd: number[]; Z: number[][] } {
+  const d = X[0].length;
+  const mu: number[] = [], sds: number[] = [];
+  for (let j = 0; j < d; j++) {
+    const col = X.map((r) => r[j]);
+    mu.push(mean(col));
+    const s = sd(col);
+    sds.push(s === 0 ? 1 : s);
+  }
+  const Z = X.map((r) => r.map((v, j) => (v - mu[j]) / sds[j]));
+  return { mu, sd: sds, Z };
+}
+export function irls(Z: number[][], y: number[], lam: number): number[] {
+  const n = Z.length, d = Z[0].length + 1;
+  const X1 = Z.map((r) => [1, ...r]);
+  let b = new Array(d).fill(0);
+  for (let it = 0; it < 60; it++) {
+    const p = X1.map((r) => {
+      const z = r.reduce((a, v, j) => a + v * b[j], 0);
+      const c = Math.max(-30, Math.min(30, z));
+      return 1 / (1 + Math.exp(-c));
+    });
+    const g = new Array(d).fill(0);
+    const H: number[][] = Array.from({ length: d }, () => new Array(d).fill(0));
+    for (let i = 0; i < n; i++) {
+      const w = Math.max(1e-6, Math.min(1, p[i] * (1 - p[i])));
+      for (let j = 0; j < d; j++) {
+        g[j] += X1[i][j] * (y[i] - p[i]);
+        for (let k = 0; k < d; k++) H[j][k] += X1[i][j] * X1[i][k] * w;
+      }
+    }
+    for (let j = 1; j < d; j++) { g[j] -= lam * b[j]; H[j][j] += lam; }
+    const step = solve(H, g);
+    let mx = 0;
+    for (let j = 0; j < d; j++) { b[j] += step[j]; mx = Math.max(mx, Math.abs(step[j])); }
+    if (mx < 1e-8) break;
+  }
+  return b;
+}
+export function predictProb(b: number[], X: number[][], mu: number[], sd: number[]): number[] {
+  return X.map((r) => {
+    const z = b[0] + r.reduce((a, v, j) => a + ((v - mu[j]) / sd[j]) * b[j + 1], 0);
+    const c = Math.max(-30, Math.min(30, z));
+    return 1 / (1 + Math.exp(-c));
   });
-  scored.sort((a, b) => b.implied - a.implied);
+}
+export function brier(p: number[], y: number[]): number {
+  return mean(p.map((v, i) => (v - y[i]) * (v - y[i])));
+}
 
-  const rows: BoardRow[] = scored.map((s, i) => ({
-    rank: i + 1,
-    slug: s.p.slug,
-    name: s.p.name,
-    category: s.p.category,
-    chains: s.p.chains,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    mcap_usd: s.p.mcap_usd,
-    listed_at: s.p.listed_at,
-    gecko_id: s.p.gecko_id,
-    symbol: s.p.symbol,
-    token_status: "pre-token",
-    age_days: s.age,
-    implied_value_usd: s.implied,
-    model: {
-      fitted_multiple: s.multiple,
-      launch_odds: s.odds,
-      age_days: s.age,
-    },
-    farm_steps: farmSteps(s.p, s.age),
-  }));
+// ---------- value-model evaluation ----------
+export interface ValueEval {
+  inSample: { r2: number; miss: number; mse: number };
+  full: { r2: number; miss: number; mse: number };
+  looFit: number; looFull: number;
+  wf1Fit: { miss: number; r2: number; base: number } | null;
+  wf1Full: { miss: number; r2: number; base: number } | null;
+  wf2Fit: { miss: number; r2: number; base: number } | null;
+  wf2Full: { miss: number; r2: number; base: number } | null;
+  oof: { r2: number; miss: number; mse: number; base: number };
+  holdout: { r2: number; miss: number; mse: number; spearman: number };
+  beta: number[];
+}
+export interface Cand { name: string; cols: number[] | null; kind: string; lam: number; rule: string }
 
-  const live: LiveRow[] = [...liveAll]
-    .sort((a, b) => b.tvl_usd - a.tvl_usd)
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      chains: p.chains,
-      tvl_usd: p.tvl_usd,
-      mcap_usd: p.mcap_usd,
-      change_7d: p.change_7d,
-    }));
-
-  // Median forward odds and eventual launch share per category, for the
-  // dashboard's model panel. The odds themselves are age-based (see
-  // forwardOdds); this table only summarises them.
-  const byCat = new Map<string, { pre: number[]; n: number; has: number }>();
-  for (const p of snap.protocols) {
-    const e = byCat.get(p.category) ?? { pre: [], n: 0, has: 0 };
-    e.n += 1;
-    if (p.gecko_id) e.has += 1;
-    byCat.set(p.category, e);
-  }
-  for (const s of scored) {
-    byCat.get(s.p.category)?.pre.push(s.odds);
-  }
-  const oddsByCategory = [...byCat.entries()]
-    .filter(([, e]) => e.pre.length > 0)
-    .map(([category, e]) => ({
-      category,
-      n_pre: e.pre.length,
-      median_odds: median(e.pre),
-      eventual_share: e.has / e.n,
-    }))
-    .sort((a, b) => b.n_pre - a.n_pre || (a.category < b.category ? -1 : 1));
-
-  // Validation numbers from the hunt ledger (same fixed splits, same
-  // metric) re-computed for the shipped model, whose growth term is
-  // clipped to [-30, +100] (see featureRow). They are measurements, not
-  // claims: the 10-fold CV is a wash (0.1415 vs 0.1494 for the TVL-only
-  // OLS), the locked holdout favours the OLS (R^2 0.2218 vs 0.1477),
-  // and the ridge's case is the walk-forward (+0.0509 vs -0.0579).
-  // See method.md.
-  const model: Record<string, number | string | string[]> = {
-    fit_ridge_lambda: 30,
-    odds_floor: 0.02,
-    odds_cap: 0.9,
-    odds_method: "forward-saturating",
-    saturating_finf: Math.round(saturating.finf * 10000) / 10000,
-    saturating_tau: Math.round(saturating.tau),
-    value_features: ["log_tvl", "log_age", "chg_7d_clipped_-30_100", "log_chains", "category_top10"],
-    validation_5fold_r2_ridge_a30: 0.1977,
-    validation_5fold_r2_c1: 0.1658,
-    validation_10fold_r2_ridge_a30: 0.1415,
-    validation_10fold_r2_c1: 0.1494,
-    validation_10fold_paired_dR2: -0.0079,
-    validation_walkforward_r2_ridge_a30: 0.0509,
-    validation_walkforward_r2_c1: -0.0579,
-    validation_holdout_r2_c1: 0.2218,
-    validation_holdout_r2_ridge_a30: 0.1477,
-    validation_holdout_mse_c1: 4.4146,
-    validation_holdout_mse_ridge_a30: 4.8347,
-    validation_holdout_spearman_c1: 0.5309,
-    validation_holdout_spearman_ridge_a30: 0.4523,
-    validation_odds_logloss_saturating: 0.4851,
-    validation_odds_logloss_logit: 0.4837,
-    validation_spearman_radar5: 0.427,
+export function evalCandidate(
+  comps: Proto[], y: number[], Xall: number[][], trimmed: number[], sel: number[],
+  ho: number[], folds: string[][], slugToIdx: Map<string, number>,
+  cand: Cand, asOf: Date
+): ValueEval {
+  const ALL = comps.map((_, i) => i);
+  const fitSet = cand.rule === "all" ? ALL : trimmed;
+  const fitPred = (tr: number[], te: number[]): number[] => {
+    if (cand.kind === "ens") {
+      const p1 = fitPredKind(tr, te, [0, 1], "ols", 0);
+      const p2 = fitPredKind(tr, te, [0, 1, 2, 3, 4], "ridge", 30);
+      return p1.map((v, i) => 0.5 * v + 0.5 * p2[i]);
+    }
+    return fitPredKind(tr, te, cand.cols as number[], cand.kind, cand.lam);
   };
-
-  const fit: Record<string, number | number[] | string[]> = {
-    beta0: ridge.beta[0],
-    beta1: ridge.beta[1] - 1,
-    median_log_tvl: ridge.medianLogTvl,
-    median_tvl_usd: ridge.medianTvl,
-    n: ridge.n,
-    residual_sd: ridge.residualSd,
-    r_squared: ridge.rSquared,
-    ridge_beta: ridge.beta,
-    ridge_categories: ridge.categories,
-    ridge_lambda: 30,
+  const fitPredKind = (tr: number[], te: number[], cols: number[], kind: string, lam: number): number[] => {
+    const Xtr = subCols(tr.map((i) => Xall[i]), cols);
+    const ytr = tr.map((i) => y[i]);
+    const beta = kind === "ols" ? ols(Xtr, ytr) : ridge(Xtr, ytr, lam);
+    return predict(subCols(te.map((i) => Xall[i]), cols), beta);
   };
-
+  const inPred = fitPred(fitSet, fitSet);
+  const fullPred = fitPred(fitSet, ALL);
+  const loo = (ev: number[]): number => {
+    const errs: number[] = [];
+    for (const i of ev) {
+      const tr = fitSet.filter((j) => j !== i);
+      errs.push(fitPred(tr, [i])[0] - y[i]);
+    }
+    return Math.exp(mean(errs.map((e) => Math.abs(e))));
+  };
+  const wf = (cut: string, ev: number[]): { miss: number; r2: number; base: number } | null => {
+    const tr = fitSet.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) < cut);
+    const te = ev.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) >= cut);
+    if (tr.length === 0 || te.length === 0) return null;
+    const pr = fitPred(tr, te);
+    const m = r2Miss(te.map((i) => y[i]), pr);
+    const base = Math.exp(mean(te.map((i) => Math.abs(y[i] - median(tr.map((j) => y[j]))))));
+    return { miss: m.miss, r2: m.r2, base };
+  };
+  // 5-fold OOF on the selection set
+  const oofPred = new Map<number, number>();
+  for (const fold of folds) {
+    const te = fold.map((s) => slugToIdx.get(s) as number);
+    const trAll = sel.filter((i) => !te.includes(i));
+    const tr = trAll.filter((i) => cand.rule === "all" || trimmed.includes(i));
+    const pr = fitPred(tr, te);
+    te.forEach((idx, k) => oofPred.set(idx, pr[k]));
+  }
+  const oofIdx = [...oofPred.keys()].sort((a, b) => a - b);
+  const oof = r2Miss(oofIdx.map((i) => y[i]), oofIdx.map((i) => oofPred.get(i) as number));
+  const oofBase = Math.exp(mean(oofIdx.map((i) => Math.abs(y[i] - median(sel.map((j) => y[j]))))));
+  // locked holdout: fit on fit-set ∩ selection
+  const trHo = fitSet.filter((i) => sel.includes(i));
+  const hoPred = fitPred(trHo, ho);
+  const hoM = r2Miss(ho.map((i) => y[i]), hoPred);
+  const hoSp = spearman(hoPred, ho.map((i) => y[i]));
+  // final beta on the full fit-set
+  let beta: number[];
+  if (cand.kind === "ens") {
+    const b1 = ols(subCols(fitSet.map((i) => Xall[i]), [0, 1]), fitSet.map((i) => y[i]));
+    const b2 = ridge(subCols(fitSet.map((i) => Xall[i]), [0, 1, 2, 3, 4]), fitSet.map((i) => y[i]), 30);
+    beta = [...b1, ...b2];
+  } else {
+    beta = cand.kind === "ols"
+      ? ols(subCols(fitSet.map((i) => Xall[i]), cand.cols as number[]), fitSet.map((i) => y[i]))
+      : ridge(subCols(fitSet.map((i) => Xall[i]), cand.cols as number[]), fitSet.map((i) => y[i]), cand.lam);
+  }
   return {
-    rows,
-    live,
-    setAside,
-    model,
-    fit,
-    oddsByCategory,
-    watchlistSize: snap.watchlist.length,
-    ridge,
-    saturating,
+    inSample: r2Miss(fitSet.map((i) => y[i]), inPred),
+    full: r2Miss(y, fullPred),
+    looFit: loo(fitSet), looFull: loo(ALL),
+    wf1Fit: wf("2024-07-15", fitSet), wf1Full: wf("2024-07-15", ALL),
+    wf2Fit: wf("2025-01-01", fitSet), wf2Full: wf("2025-01-01", ALL),
+    oof: { ...oof, base: oofBase },
+    holdout: { r2: hoM.r2, miss: hoM.miss, mse: hoM.mse, spearman: hoSp },
+    beta,
   };
+}
+
+// ---------- full build ----------
+export interface Validation {
+  value: Record<string, ValueEval>;
+  odds: {
+    target: string; nDated: number; nPositive: number; baseRate: number;
+    lambda: number; cvBrier: Record<string, number>; constantBrier: number;
+    coefs: number[]; mu: number[]; sd: number[]; bootstrapSe: number[];
+    inSampleBrier: number;
+    timeSplit1: { cut: string; train: number; test: number; brier: number; constant: number };
+    timeSplit2: { cut: string; train: number; test: number; brier: number; constant: number };
+    marginals: Record<string, number[]>;
+  };
+  bands: { q10: number; q25: number; q50: number; q75: number; q90: number;
+    coverage2575: number; coverage1090: number; wfCov1: number; wfCov2: number; wfCov1090_1: number; wfCov1090_2: number };
+  tols: { beta: number[]; se: number[]; ci: number[][] };
+  ablation: Record<string, { looFull: number; wf1Full: number; wf2Full: number }>;
+  census: { ranked: number; aside: number; live: number; total: number };
+  verdicts: Record<string, number>;
+  economics: { netMedian: number; netMax: number; netLoMax: number; minDepMin: number; bestRow: string };
+}
+
+export function buildBoard(snap: Snapshot, splits: { holdout_slugs: string[]; selection_slugs: string[]; folds: string[][] }): {
+  rows: BoardRow[]; aside: AsideRow[]; liveCount: number; validation: Validation;
+} {
+  const asOf = new Date(Date.UTC(2026, 10, 14));
+  const protos = snap.protocols;
+  const watch = new Set(snap.watchlist);
+  const comps = protos.filter((p) => p.mcap_usd !== null && (p.mcap_usd as number) > 0);
+  const slugToComp = new Map(comps.map((p, i) => [p.slug, i]));
+  const y = comps.map((p) => Math.log(p.mcap_usd as number));
+  const ages = comps.map((p) => ageDays(p, asOf)).filter((a): a is number => a !== null);
+  const medAge = median(ages);
+  const chgs = comps.map((p) => p.change_7d).filter((c): c is number => c !== null);
+  const medChg = median(chgs);
+  const Xall = comps.map((p) => valueFeatures(p, medAge, medChg, asOf));
+  const trimmed = comps.map((_, i) => i).filter((i) => {
+    const r = (comps[i].mcap_usd as number) / comps[i].tvl_usd;
+    return r >= TRIM_LO && r <= TRIM_HI;
+  });
+  const sel = comps.map((_, i) => i).filter((i) => splits.selection_slugs.includes(comps[i].slug));
+  const ho = comps.map((_, i) => i).filter((i) => splits.holdout_slugs.includes(comps[i].slug));
+
+  // --- value candidates ---
+  const cands: Cand[] = [
+    { name: "C1-ols-tvl (R5)", cols: [0, 1], kind: "ols", lam: 0, rule: "all" },
+    { name: "R6-ridge-a30-full", cols: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], kind: "ridge", lam: 30, rule: "all" },
+    { name: "T-OLS-tvl", cols: [0, 1], kind: "ols", lam: 0, rule: "trimmed" },
+    { name: "T-OLS-FA", cols: [0, 1, 2, 3], kind: "ols", lam: 0, rule: "trimmed" },
+    { name: "T-R10", cols: [0, 1, 2, 3, 4], kind: "ridge", lam: 10, rule: "trimmed" },
+    { name: "T-R30", cols: [0, 1, 2, 3, 4], kind: "ridge", lam: 30, rule: "trimmed" },
+    { name: "T-ENS", cols: null, kind: "ens", lam: 0, rule: "trimmed" },
+  ];
+  const value: Record<string, ValueEval> = {};
+  for (const c of cands) value[c.name] = evalCandidate(comps, y, Xall, trimmed, sel, ho, splits.folds, slugToComp, c, asOf);
+  const tolsBeta = value["T-OLS-tvl"].beta;
+
+  // --- bands from T-OLS LOO residuals on the trimmed set ---
+  const looRes: number[] = [];
+  for (const i of trimmed) {
+    const tr = trimmed.filter((j) => j !== i);
+    const b = ols(subCols(tr.map((j) => Xall[j]), [0, 1]), tr.map((j) => y[j]));
+    const pred = b[0] + b[1] * Math.log(comps[i].tvl_usd);
+    looRes.push(y[i] - pred);
+  }
+  const resSorted = [...looRes].sort((a, b) => a - b);
+  const q = (p: number) => Math.exp(quantile(resSorted, p));
+  const bandQ = { q10: q(0.1), q25: q(0.25), q50: q(0.5), q75: q(0.75), q90: q(0.9) };
+  const cov2575 = looRes.filter((r) => Math.exp(r) >= bandQ.q25 && Math.exp(r) <= bandQ.q75).length / looRes.length;
+  const cov1090 = looRes.filter((r) => Math.exp(r) >= bandQ.q10 && Math.exp(r) <= bandQ.q90).length / looRes.length;
+  const wfCov = (cut: string): { c2575: number; c1090: number } => {
+    const tr = trimmed.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) < cut);
+    const te = trimmed.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) >= cut);
+    const b = ols(subCols(tr.map((j) => Xall[j]), [0, 1]), tr.map((j) => y[j]));
+    const rr = te.map((i) => Math.exp(y[i] - (b[0] + b[1] * Math.log(comps[i].tvl_usd))));
+    return {
+      c2575: rr.filter((v) => v >= bandQ.q25 && v <= bandQ.q75).length / rr.length,
+      c1090: rr.filter((v) => v >= bandQ.q10 && v <= bandQ.q90).length / rr.length,
+    };
+  };
+  const wc1 = wfCov("2024-07-15"), wc2 = wfCov("2025-01-01");
+
+  // --- T-OLS bootstrap SEs (200 refits, LCG seed 7) ---
+  const Xtrim = subCols(trimmed.map((i) => Xall[i]), [0, 1]);
+  const ytrim = trimmed.map((i) => y[i]);
+  const bootB: number[][] = [];
+  const rnd = lcg(7);
+  for (let k = 0; k < 200; k++) {
+    const idx = Array.from({ length: trimmed.length }, () => Math.floor(rnd() * trimmed.length));
+    bootB.push(ols(idx.map((j) => Xtrim[j]), idx.map((j) => ytrim[j])));
+  }
+  const se0 = sd(bootB.map((b) => b[0])), se1 = sd(bootB.map((b) => b[1]));
+  const tols = {
+    beta: tolsBeta,
+    se: [se0, se1],
+    ci: [[tolsBeta[0] - 1.96 * se0, tolsBeta[0] + 1.96 * se0], [tolsBeta[1] - 1.96 * se1, tolsBeta[1] + 1.96 * se1]],
+  };
+
+  // --- odds model on dated protocols (target: symbol non-null) ---
+  const dated = protos.filter((p) => p.listed_at !== null);
+  const yd = dated.map((p) => (p.symbol ? 1 : 0));
+  const dAges = dated.map((p) => ageDays(p, asOf)).filter((a): a is number => a !== null);
+  const medAgeD = median(dAges);
+  const dChgs = dated.map((p) => p.change_7d).filter((c): c is number => c !== null);
+  const medChgD = median(dChgs);
+  const Xd = dated.map((p) => oddsFeatures(p, medAgeD, medChgD, asOf));
+  const nD = dated.length;
+  // stratified 10-fold (seed 7 shuffle via LCG)
+  const foldOf = new Array(nD).fill(0);
+  const shuffle = (arr: number[]): number[] => {
+    const a = [...arr]; const r = lcg(7);
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  };
+  const pos = shuffle(dated.map((_, i) => i).filter((i) => yd[i] === 1));
+  const neg = shuffle(dated.map((_, i) => i).filter((i) => yd[i] === 0));
+  for (let k = 0; k < 10; k++) {
+    for (const chunk of [pos, neg]) {
+      const size = Math.ceil(chunk.length / 10);
+      const part = chunk.slice(k * size, (k + 1) * size);
+      for (const i of part) foldOf[i] = k;
+    }
+  }
+  const constBrier = mean(yd) * (1 - mean(yd));
+  const cvBrier: Record<string, number> = {};
+  for (const lam of [0.1, 1, 10, 30]) {
+    const oof = new Array(nD).fill(0);
+    for (let k = 0; k < 10; k++) {
+      const te = dated.map((_, i) => i).filter((i) => foldOf[i] === k);
+      const tr = dated.map((_, i) => i).filter((i) => foldOf[i] !== k);
+      const st = standardize(tr.map((i) => Xd[i]));
+      const b = irls(st.Z, tr.map((i) => yd[i]), lam);
+      const pr = predictProb(b, te.map((i) => Xd[i]), st.mu, st.sd);
+      te.forEach((idx, j) => { oof[idx] = pr[j]; });
+    }
+    cvBrier[String(lam)] = brier(oof, yd);
+  }
+  const bestLam = [0.1, 1, 10, 30].reduce((a, b) => (cvBrier[String(a)] <= cvBrier[String(b)] ? a : b));
+  const stAll = standardize(Xd);
+  const bFinal = irls(stAll.Z, yd, bestLam);
+  const pFinal = predictProb(bFinal, Xd, stAll.mu, stAll.sd);
+  const bootO: number[][] = [];
+  const rndO = lcg(7);
+  for (let k = 0; k < 100; k++) {
+    const idx = Array.from({ length: nD }, () => Math.floor(rndO() * nD));
+    bootO.push(irls(idx.map((j) => stAll.Z[j]), idx.map((j) => yd[j]), bestLam));
+  }
+  const bootSe = [0, 1, 2, 3].map((j) => sd(bootO.map((b) => b[j])));
+  const timeSplit = (cut: string) => {
+    const tr = dated.map((_, i) => i).filter((i) => (dated[i].listed_at as string) < cut);
+    const te = dated.map((_, i) => i).filter((i) => (dated[i].listed_at as string) >= cut);
+    const st = standardize(tr.map((i) => Xd[i]));
+    const b = irls(st.Z, tr.map((i) => yd[i]), bestLam);
+    const pr = predictProb(b, te.map((i) => Xd[i]), st.mu, st.sd);
+    const base = mean(tr.map((i) => yd[i]));
+    const cb = mean(te.map((i) => (base - yd[i]) * (base - yd[i])));
+    return { cut, train: tr.length, test: te.length, brier: brier(pr, te.map((i) => yd[i])), constant: cb };
+  };
+  const ts1 = timeSplit("2024-07-15"), ts2 = timeSplit("2025-01-01");
+  // marginal effects: P(token) at P10/P25/P50/P75/P90 of each feature, others at median
+  const medX = [0, 1, 2].map((j) => median(Xd.map((r) => r[j])));
+  const marginals: Record<string, number[]> = {};
+  for (let j = 0; j < 3; j++) {
+    const qs = [0.1, 0.25, 0.5, 0.75, 0.9].map((q) => quantile([...Xd.map((r) => r[j])].sort((a, b) => a - b), q));
+    marginals[["lnTVL", "lnAge", "chg"][j]] = qs.map((qv) => {
+      const row = [...medX]; row[j] = qv;
+      return predictProb(bFinal, [row], stAll.mu, stAll.sd)[0];
+    });
+  }
+
+  // --- ablation (LOO-full + WF-full miss; permutation controls use rotation, deterministic) ---
+  const ablFit = (tr: number[], te: number[], cols: number[], kind: string, lam: number, perm: string | null, std: boolean): number[] => {
+    let Xtr = subCols(tr.map((i) => Xall[i]), cols);
+    let Xte = subCols(te.map((i) => Xall[i]), cols);
+    if (perm) {
+      const colIdx = perm === "growth" ? 3 : 2; // position in the full 15-dim vector
+      const posInCols = cols.indexOf(colIdx);
+      if (posInCols >= 0) {
+        const vals = tr.map((i) => Xall[i][colIdx]);
+        const permuted = perm === "growth" ? [...vals].reverse() : [...vals.slice(1), vals[0]];
+        Xtr = Xtr.map((row, k) => { const r = [...row]; r[posInCols] = permuted[k]; return r; });
+        // test rows keep their own values (the control breaks the TRAINING link only)
+        void Xte;
+      }
+    }
+    const ytr = tr.map((i) => y[i]);
+    if (std) {
+      const mu = cols.slice(1).map((_, j) => mean(Xtr.map((r) => r[j + 1])));
+      const sdv = cols.slice(1).map((_, j) => { const s = sd(Xtr.map((r) => r[j + 1])); return s === 0 ? 1 : s; });
+      const Ztr = Xtr.map((r) => [r[0], ...r.slice(1).map((v, j) => (v - mu[j]) / sdv[j])]);
+      const Zte = Xte.map((r) => [r[0], ...r.slice(1).map((v, j) => (v - mu[j]) / sdv[j])]);
+      const beta = kind === "ols" ? ols(Ztr, ytr) : ridge(Ztr, ytr, lam);
+      return predict(Zte, beta);
+    }
+    const beta = kind === "ols" ? ols(Xtr, ytr) : ridge(Xtr, ytr, lam);
+    return predict(Xte, beta);
+  };
+  const ablLoo = (fs: number[], cols: number[], kind: string, lam: number, perm: string | null, std: boolean): number => {
+    const errs: number[] = [];
+    for (let i = 0; i < comps.length; i++) {
+      const tr = fs.filter((j) => j !== i);
+      errs.push(ablFit(tr, [i], cols, kind, lam, perm, std)[0] - y[i]);
+    }
+    return Math.exp(mean(errs.map((e) => Math.abs(e))));
+  };
+  const ablWf = (fs: number[], cols: number[], kind: string, lam: number, cut: string, perm: string | null, std: boolean): number => {
+    const tr = fs.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) < cut);
+    const te = comps.map((_, i) => i).filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) >= cut);
+    const pr = ablFit(tr, te, cols, kind, lam, perm, std);
+    return Math.exp(mean(pr.map((v, k) => Math.abs(v - y[te[k]]))));
+  };
+  const ablEns = (fn: (cut: string | null) => number): { looFull: number; wf1Full: number; wf2Full: number } => ({
+    looFull: fn(null), wf1Full: fn("2024-07-15"), wf2Full: fn("2025-01-01"),
+  });
+  const ablation: Record<string, { looFull: number; wf1Full: number; wf2Full: number }> = {};
+  const ablRows: [string, number[] | null, string, number, number[], string | null, boolean][] = [
+    ["T-OLS (SHIPPED)", [0, 1], "ols", 0, trimmed, null, false],
+    ["T-OLS-FA (+age+growth)", [0, 1, 2, 3], "ols", 0, trimmed, null, false],
+    ["T-OLS-FA permuted growth", [0, 1, 2, 3], "ols", 0, trimmed, "growth", false],
+    ["T-OLS-FA shuffled age", [0, 1, 2, 3], "ols", 0, trimmed, "age", false],
+    ["T-R30 (+age+growth+chains)", [0, 1, 2, 3, 4], "ridge", 30, trimmed, null, false],
+    ["T-R30 + category dummies", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], "ridge", 30, trimmed, null, false],
+    ["T-R30 standardized", [0, 1, 2, 3, 4], "ridge", 30, trimmed, null, true],
+    ["C1 full-set OLS", [0, 1], "ols", 0, comps.map((_, i) => i), null, false],
+    ["R6 ridge-a30 full", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], "ridge", 30, comps.map((_, i) => i), null, false],
+  ];
+  for (const [name, cols, kind, lam, fs, perm, std] of ablRows) {
+    ablation[name] = {
+      looFull: ablLoo(fs, cols as number[], kind, lam, perm, std),
+      wf1Full: ablWf(fs, cols as number[], kind, lam, "2024-07-15", perm, std),
+      wf2Full: ablWf(fs, cols as number[], kind, lam, "2025-01-01", perm, std),
+    };
+  }
+  // T-ENS ablation
+  const ensLoo = (): number => {
+    const errs: number[] = [];
+    for (let i = 0; i < comps.length; i++) {
+      const tr = trimmed.filter((j) => j !== i);
+      const p1 = ablFit(tr, [i], [0, 1], "ols", 0, null, false)[0];
+      const p2 = ablFit(tr, [i], [0, 1, 2, 3, 4], "ridge", 30, null, false)[0];
+      errs.push(0.5 * p1 + 0.5 * p2 - y[i]);
+    }
+    return Math.exp(mean(errs.map((e) => Math.abs(e))));
+  };
+  const ensWf = (cut: string): number => {
+    const tr = trimmed.filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) < cut);
+    const te = comps.map((_, i) => i).filter((i) => comps[i].listed_at !== null && (comps[i].listed_at as string) >= cut);
+    const p1 = ablFit(tr, te, [0, 1], "ols", 0, null, false);
+    const p2 = ablFit(tr, te, [0, 1, 2, 3, 4], "ridge", 30, null, false);
+    return Math.exp(mean(p1.map((v, k) => Math.abs(0.5 * v + 0.5 * p2[k] - y[te[k]]))));
+  };
+  ablation["T-ENS (OLS+R30 avg)"] = { looFull: ensLoo(), wf1Full: ensWf("2024-07-15"), wf2Full: ensWf("2025-01-01") };
+  void ablEns;
+
+  // --- board: screens + economics ---
+  const rows: BoardRow[] = [];
+  const aside: AsideRow[] = [];
+  let liveCount = 0;
+  for (const p of protos) {
+    if (p.mcap_usd !== null) { liveCount++; continue; }
+    if (!watch.has(p.slug)) {
+      const r = screenReason(p);
+      if (r) { aside.push({ slug: p.slug, name: p.name, reason: r }); continue; }
+    }
+    const fitted = Math.exp(tolsBeta[0] + tolsBeta[1] * Math.log(p.tvl_usd));
+    const o = predictProb(bFinal, [oddsFeatures(p, medAgeD, medChgD, asOf)], stAll.mu, stAll.sd)[0];
+    const g = gasFor(p.chains[0] || "");
+    const costs = BRIDGE_USD + g.usd + WEEKS * WEEK_USD;
+    const share = DEPOSIT_USD / (PARTICIPATION * p.tvl_usd);
+    const gross = POOL_PCT * fitted * share;
+    const grossLo = POOL_PCT * fitted * bandQ.q25 * share;
+    const net = gross - costs;
+    const netLo = grossLo - costs;
+    const verdict = netLo >= FARM_HURDLE_USD ? "FARM" : net > 0 ? "MARGINAL" : "SKIP";
+    const minDep = Math.max(DEPOSIT_USD, (FARM_HURDLE_USD + costs) * PARTICIPATION * p.tvl_usd / (POOL_PCT * fitted * bandQ.q25));
+    const netP2 = POOL_PCT * fitted * (DEPOSIT_USD / (0.02 * p.tvl_usd)) - costs;
+    const netP10 = POOL_PCT * fitted * (DEPOSIT_USD / (0.10 * p.tvl_usd)) - costs;
+    const age = ageDays(p, asOf);
+    const row: BoardRow = {
+      rank: 0, slug: p.slug, name: p.name, category: p.category, chains: p.chains,
+      tvl_usd: p.tvl_usd, change_7d: p.change_7d, age_days: age,
+      fitted_usd: fitted, odds: o,
+      band_lo_usd: fitted * bandQ.q25, band_hi_usd: fitted * bandQ.q75,
+      band_lo10_usd: fitted * bandQ.q10, band_hi90_usd: fitted * bandQ.q90,
+      multiple: fitted / p.tvl_usd, costs_usd: costs, gross_usd: gross,
+      net_usd: net, net_lo_usd: netLo, net_h_usd: net / HOURS,
+      verdict, min_dep_usd: minDep, net_p2_usd: netP2, net_p10_usd: netP10,
+      gas_usd: g.usd, gas_sym: g.sym, watchlist: watch.has(p.slug),
+      farm_steps: [], program: PROGRAMS[p.slug] !== undefined ? PROGRAMS[p.slug] : null,
+    };
+    row.farm_steps = farmSteps(row, row.program);
+    rows.push(row);
+  }
+  rows.sort((a, b) => b.fitted_usd - a.fitted_usd);
+  rows.forEach((r, i) => { r.rank = i + 1; });
+  const verdicts: Record<string, number> = {};
+  for (const r of rows) verdicts[r.verdict] = (verdicts[r.verdict] || 0) + 1;
+  const nets = rows.map((r) => r.net_usd);
+  const bestRow = rows.reduce((a, b) => (b.net_usd > a.net_usd ? b : a), rows[0]);
+  const validation: Validation = {
+    value,
+    odds: {
+      target: "symbol non-null (token ticker exists)", nDated: nD, nPositive: yd.reduce((a, b) => a + b, 0),
+      baseRate: mean(yd), lambda: bestLam, cvBrier, constantBrier: constBrier,
+      coefs: bFinal, mu: stAll.mu, sd: stAll.sd, bootstrapSe: bootSe,
+      inSampleBrier: brier(pFinal, yd), timeSplit1: ts1, timeSplit2: ts2, marginals,
+    },
+    bands: { ...bandQ, coverage2575: cov2575, coverage1090: cov1090, wfCov1: wc1.c2575, wfCov2: wc2.c2575, wfCov1090_1: wc1.c1090, wfCov1090_2: wc2.c1090 },
+    tols,
+    ablation,
+    census: { ranked: rows.length, aside: aside.length, live: liveCount, total: protos.length },
+    verdicts,
+    economics: {
+      netMedian: median(nets), netMax: Math.max(...nets),
+      netLoMax: Math.max(...rows.map((r) => r.net_lo_usd)),
+      minDepMin: Math.min(...rows.map((r) => r.min_dep_usd)), bestRow: bestRow.slug,
+    },
+  };
+  return { rows, aside, liveCount, validation };
 }

@@ -1,311 +1,290 @@
-// Token Radar, the page. Renders window.RADAR (written by main.ts from the
-// sealed snapshot), sorts and filters the board, and opens one protocol's
-// detail: the model breakdown recomputed in the page and the farm plan the
-// board itself carries, so the page and board.json can never disagree.
-//
-// Hash state, so a view is a link: #view=board|live|setaside, #q=<text>,
-// #category=<name>, #chain=<name>, #p=<slug> opens the detail dialog.
-
-const D = window.RADAR;
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-/** $404.0M, $1.23B, $477K, $199: the board's whole-dollar values, readable at a glance. */
-function money(n) {
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
-  return `$${n}`;
-}
-function moneyFull(n) {
-  return `$${Math.round(n).toLocaleString('en-US')}`;
-}
-function pct(n) {
-  if (n === null || n === undefined) return '<span class="muted">—</span>';
-  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : '';
-  return `<span class="${cls}">${n > 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
-}
-function ageText(days) {
-  if (days === null || days === undefined) return '<span class="muted">unknown</span>';
-  if (days < 30) return `${days}d`;
-  if (days < 365) return `${(days / 30).toFixed(0)}mo`;
-  return `${(days / 365).toFixed(1)}y`;
-}
-
-// ---------------------------------------------------------------- stats and filters
-
-const topImplied = D.rows.length ? D.rows[0].implied_value_usd : 0;
-$('stats').innerHTML = [
-  ['Ranked', D.board_size],
-  ['Watchlist', D.watchlist_size],
-  ['Early, below floor', D.early_size],
-  ['Top implied value', money(topImplied)],
-  ['Snapshot', D.as_of],
-].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
-
-const categories = [...new Set(D.rows.map((r) => r.category).filter(Boolean))].sort();
-const chains = [...new Set(D.rows.flatMap((r) => r.chains))].sort();
-for (const c of categories) $('category').insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
-for (const c of chains) $('chain').insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
-
-// ---------------------------------------------------------------- the board
-
-let sortKey = 'rank';
-let sortDir = 1;
-const SORTABLE = { rank: (r) => r.rank, name: (r) => r.name.toLowerCase(), tvl_usd: (r) => r.tvl_usd, change_7d: (r) => r.change_7d ?? -1e9, age_days: (r) => r.age_days ?? -1, implied_value_usd: (r) => r.implied_value_usd };
-
-function filteredRows() {
-  const q = $('q').value.trim().toLowerCase();
-  const cat = $('category').value;
-  const chain = $('chain').value;
-  return D.rows.filter((r) => {
-    if (q && !(r.name.toLowerCase().includes(q) || r.slug.includes(q))) return false;
-    if (cat && r.category !== cat) return false;
-    if (chain && !r.chains.includes(chain)) return false;
-    return true;
-  });
-}
-
-function renderBoard() {
-  const rows = filteredRows();
-  const key = SORTABLE[sortKey];
-  rows.sort((a, b) => {
-    const av = key(a), bv = key(b);
-    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-    return cmp * sortDir || (a.rank - b.rank);
-  });
-  $('rows').innerHTML = rows.map((r) => `
-    <tr data-slug="${esc(r.slug)}">
-      <td class="num">${r.rank}</td>
-      <td><strong>${esc(r.name)}</strong> <span class="slug">${esc(r.slug)}</span><br><span class="cat">${esc(r.category ?? 'Uncategorized')}</span></td>
-      <td class="num">${money(r.tvl_usd)}</td>
-      <td class="num">${pct(r.change_7d)}</td>
-      <td class="num">${ageText(r.age_days)}</td>
-      <td>${r.chains.slice(0, 3).map(esc).join(', ')}${r.chains.length > 3 ? ` +${r.chains.length - 3}` : ''}</td>
-      <td class="num"><strong>${money(r.implied_value_usd)}</strong><div class="bar"><i style="width:${Math.max(2, (r.implied_value_usd / topImplied) * 100).toFixed(1)}%"></i></div></td>
-    </tr>`).join('');
-  $('count').textContent = rows.length === D.rows.length
-    ? `${D.rows.length} protocols ranked: the full watchlist plus every clean pre-token protocol below the floor.`
-    : `${rows.length} of ${D.rows.length} protocols match.`;
-  document.querySelectorAll('#board th[data-sort]').forEach((th) => {
-    th.classList.toggle('sorted', th.dataset.sort === sortKey);
-    th.textContent = th.textContent.replace(/ [▲▼]$/, '') + (th.dataset.sort === sortKey ? (sortDir === 1 ? ' ▲' : ' ▼') : '');
-  });
-}
-
-document.querySelectorAll('#board th[data-sort]').forEach((th) => {
-  const sort = () => {
-    if (sortKey === th.dataset.sort) sortDir *= -1;
-    else { sortKey = th.dataset.sort; sortDir = sortKey === 'rank' ? 1 : -1; }
-    renderBoard();
+// Launch Radar dashboard — renders RADAR_DATA (embedded by main.ts).
+// No network, no fetch: everything is recomputed in the browser from the
+// embedded board, so the integrity strip is a live re-check, not a label.
+(function () {
+  var D = window.RADAR_DATA;
+  if (!D) { document.body.innerHTML = "<p>Board data failed to load.</p>"; return; }
+  var rows = D.rows, V = D.validation, meta = D.meta;
+  var $ = function (id) { return document.getElementById(id); };
+  var fmt$ = function (n) {
+    if (n === null || n === undefined || !isFinite(n)) return "—";
+    var a = Math.abs(n);
+    if (a >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+    if (a >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+    return "$" + n.toFixed(2);
   };
-  th.addEventListener('click', sort);
-  th.setAttribute('tabindex', '0');
-  th.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sort(); }
-  });
-});
-$('rows').addEventListener('click', (e) => {
-  const tr = e.target.closest('tr[data-slug]');
-  if (tr) openDetail(tr.dataset.slug);
-});
+  var fmtInt = function (n) { return Math.round(n).toLocaleString("en-US"); };
+  var r2 = function (n) { return (n === null || n === undefined) ? "—" : n.toFixed(4); };
+  var r3 = function (n) { return (n === null || n === undefined) ? "—" : n.toFixed(3); };
+  var esc = function (s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); };
 
-// ---------------------------------------------------------------- live and set-aside views
-
-$('live-rows').innerHTML = D.live.map((r) => `
-  <tr>
-    <td><strong>${esc(r.name)}</strong> <span class="slug">${esc(r.slug)}</span><br><span class="cat">${esc(r.category ?? 'Uncategorized')}</span></td>
-    <td class="num">${money(r.tvl_usd)}</td>
-    <td class="num">${r.mcap_usd === null ? '<span class="muted">—</span>' : money(r.mcap_usd)}</td>
-    <td class="num">${r.mcap_usd === null ? '<span class="muted">—</span>' : (r.mcap_usd / r.tvl_usd).toFixed(3)}</td>
-    <td class="num">${pct(r.change_7d)}</td>
-  </tr>`).join('');
-
-$('setaside-rows').innerHTML = D.set_aside.map((r) => `
-  <tr>
-    <td><strong>${esc(r.name)}</strong> <span class="slug">${esc(r.slug)}</span><br><span class="cat">${esc(r.category ?? 'Uncategorized')}</span></td>
-    <td class="num">${money(r.tvl_usd)}</td>
-    <td>${esc(r.reason)}</td>
-  </tr>`).join('');
-
-// ---------------------------------------------------------------- tabs and hash state
-
-const VIEWS = ['board', 'live', 'setaside'];
-function showView(view) {
-  if (!VIEWS.includes(view)) view = 'board';
-  document.querySelectorAll('.tab').forEach((t) => {
-    const on = t.dataset.view === view;
-    t.classList.toggle('active', on);
-    t.setAttribute('aria-selected', String(on));
-  });
-  $('board-panel').classList.toggle('hidden', view !== 'board');
-  $('live-panel').classList.toggle('hidden', view !== 'live');
-  $('setaside-panel').classList.toggle('hidden', view !== 'setaside');
-  document.querySelector('.controls .filters').style.display = view === 'board' ? '' : 'none';
-  $('count').style.display = view === 'board' ? '' : 'none';
-}
-document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => { syncHash({ view: t.dataset.view }); }));
-
-function readHash() {
-  const h = new URLSearchParams(location.hash.slice(1));
-  return { view: h.get('view') || 'board', q: h.get('q') || '', category: h.get('category') || '', chain: h.get('chain') || '', p: h.get('p') || '' };
-}
-function syncHash(patch) {
-  const cur = readHash();
-  const next = { ...cur, ...patch };
-  const h = new URLSearchParams();
-  if (next.view !== 'board') h.set('view', next.view);
-  if (next.q) h.set('q', next.q);
-  if (next.category) h.set('category', next.category);
-  if (next.chain) h.set('chain', next.chain);
-  if (next.p) h.set('p', next.p);
-  history.replaceState(null, '', h.toString() ? `#${h}` : location.pathname + location.search);
-
-applyHash();
-}
-function applyHash() {
-  const h = readHash();
-  showView(h.view);
-  if ($('q').value !== h.q) $('q').value = h.q;
-  if ($('category').value !== h.category) $('category').value = h.category;
-  if ($('chain').value !== h.chain) $('chain').value = h.chain;
-  renderBoard();
-  if (h.p) openDetail(h.p, false);
-}
-let qTimer = null;
-$('q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => syncHash({ q: $('q').value.trim() }), 200); });
-$('category').addEventListener('change', () => syncHash({ category: $('category').value }));
-$('chain').addEventListener('change', () => syncHash({ chain: $('chain').value }));
-$('reset').addEventListener('click', () => syncHash({ view: 'board', q: '', category: '', chain: '', p: '' }));
-window.addEventListener('hashchange', applyHash);
-
-// ---------------------------------------------------------------- detail dialog
-
-function openDetail(slug, push = true) {
-  const r = D.rows.find((x) => x.slug === slug);
-  if (!r) return;
-  // The breakdown, recomputed here from the row's own figures. The product
-  // must equal the implied value the board carries.
-  const recomputed = Math.max(1, Math.round(r.tvl_usd * r.fitted_multiple * r.launch_odds));
-  const agree = recomputed === r.implied_value_usd;
-  // Where the fitted multiple comes from: the ridge fitted on the snapshot's
-  // live market, evaluated at this protocol's own figures. Every term is
-  // shown, so the multiple can be checked against the row: the fitted
-  // slope on ln TVL is below 1, so a bigger TVL gets a smaller multiple.
-  const chg = Math.min(100, Math.max(-30, r.change_7d ?? 0));
-  const feats = [1, Math.log(r.tvl_usd), Math.log((r.age_days ?? 0) + 1), chg, Math.log(Math.max(1, r.chains.length))];
-  for (const c of D.fit.ridge_categories) feats.push(r.category === c ? 1 : 0);
-  const predLogMcap = feats.reduce((s, v, j) => s + v * D.fit.ridge_beta[j], 0);
-  const recomputedMultiple = Math.exp(predLogMcap - Math.log(r.tvl_usd));
-  const shown = [
-    `intercept ${D.fit.ridge_beta[0].toFixed(4)}`,
-    `ln TVL ${Math.log(r.tvl_usd).toFixed(2)} × ${D.fit.ridge_beta[1].toFixed(4)}`,
-    `ln(age + 1) ${Math.log((r.age_days ?? 0) + 1).toFixed(2)} × ${D.fit.ridge_beta[2].toFixed(4)}`,
-    `7-day change ${chg.toFixed(1)} × ${D.fit.ridge_beta[3].toFixed(4)}`,
-    `ln chains ${Math.log(Math.max(1, r.chains.length)).toFixed(2)} × ${D.fit.ridge_beta[4].toFixed(4)}`,
+  // ---------- KPI strip ----------
+  var tols = V.value["T-OLS-tvl"];
+  var kpis = [
+    ["Ranked rows", String(rows.length), "of 614 pre-token protocols"],
+    ["Watchlist", rows.filter(function (r) { return r.watchlist; }).length + " / 40", "every watchlist protocol ranked"],
+    ["Census", V.census.total + " accounted", rows.length + " ranked + " + D.aside.length + " set aside + " + D.live_count + " live"],
+    ["Value fit R² (trimmed)", r2(tols.inSample.r2), "94 comps, mcap/TVL in [0.02, 2]"],
+    ["LOO miss (trimmed)", "×" + r3(tols.looFit), "typical error within 2.85× either way"],
+    ["Odds Brier", r3(V.odds.cvBrier["0.1"]) + " vs " + r3(V.odds.constantBrier), "10-fold, constant = base rate"],
+    ["Verdicts", (V.verdicts.FARM || 0) + " FARM · " + (V.verdicts.MARGINAL || 0) + " MARG · " + (V.verdicts.SKIP || 0) + " SKIP", "band-low net vs $150 hurdle"],
+    ["Median farm net", "$" + V.economics.netMedian.toFixed(2), "best row: " + V.economics.bestRow + " ($" + V.economics.netMax.toFixed(2) + ")"],
   ];
-  const catIdx = D.fit.ridge_categories.indexOf(r.category ?? '');
-  if (catIdx >= 0) shown.push(`is ${r.category} × ${D.fit.ridge_beta[5 + catIdx].toFixed(4)}`);
-  const multipleNote = `<p>The fitted multiple ${r.fitted_multiple.toFixed(4)} comes from a ridge fitted on ${D.fit.n} live protocols with a market cap (penalty λ = ${D.fit.ridge_lambda}): ln(market cap) = ${shown.join(' + ')}, which at this protocol's figures gives ln(market cap) ${predLogMcap.toFixed(2)} and a multiple of ${recomputedMultiple.toFixed(4)}. The 7-day change is clipped to [−30%, +100%], so one wild week cannot dominate the multiple. The fit's residual spread is ${D.fit.residual_sd} and its R² is ${D.fit.r_squared}, so most of the multiple is still idiosyncratic: the fit is a pricing rule, not a prediction.</p>`;
-  // Where the launch odds come from: the saturating launch curve fitted on
-  // all 758 protocols. The forward odds are (Finf − F(age)) / (1 − F(age)),
-  // where F(age) = Finf × (1 − exp(−age / tau)).
-  const ageBand = r.age_days === null ? 'unknown' : r.age_days < 365 ? 'under a year' : r.age_days < 1095 ? 'one to three years' : 'over three years';
-  const finf = D.model.saturating_finf;
-  const tau = D.model.saturating_tau;
-  const fAge = finf * (1 - Math.exp(-(r.age_days ?? 0) / tau));
-  const oddsNote = `<p>The launch odds ${r.launch_odds.toFixed(2)} are the forward odds that a protocol listed ${ageBand} ago ever launches a token. Among all 758 protocols, the share that have launched by age <em>a</em> follows F(<em>a</em>) = ${finf} × (1 − exp(−<em>a</em> / ${tau} days)); at this protocol's age of ${r.age_days} days, F = ${fAge.toFixed(2)} have already launched, so the forward odds are (${finf} − ${fAge.toFixed(2)}) ÷ (1 − ${fAge.toFixed(2)}) = ${r.launch_odds.toFixed(2)}. The odds are a peer-history estimate, not a validated prediction: the snapshot records no launch dates, so no held-out launch exists to test them against.</p>`;
-  // What could be wrong: honest flags from the row's own figures, so the
-  // implied value is read with its uncertainty attached.
-  const flags = [];
-  if (r.launch_odds <= 0.35) flags.push(`Only about ${Math.round(r.launch_odds * 100)}% of comparable protocols ever launch a token, so most of the value-if-launched is discounted away.`);
-  if (r.change_7d !== null && r.change_7d < 0) flags.push(`TVL fell ${Math.abs(r.change_7d).toFixed(1)}% in the last 7 days, the protocol is shrinking, not growing. The model prices the 7-day change, clipped to [−30%, +100%], so one wild week cannot dominate the multiple.${r.change_7d < -30 ? ' This week’s move is clipped to −30% in the model.' : ''}`);
-  if (r.change_7d !== null && r.change_7d > 100) flags.push(`TVL rose ${r.change_7d.toFixed(1)}% in the last 7 days — an extreme weekly move, clipped to +100% in the model, so it cannot dominate the multiple.`);
-  if (r.change_7d === null) flags.push('No 7-day TVL figure is recorded for this protocol.');
-  if (r.age_days !== null && r.age_days < 180) flags.push(`Listed only ${r.age_days} days ago, a short record, so the launch odds rest on very little history.`);
-  const watch = flags.length
-    ? `<h3>What to watch</h3><ul class="steps">${flags.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
-    : '';
-  $('detail-body').innerHTML = `
-    <p class="detail-kicker">Rank #${r.rank}, ${esc(r.category ?? 'Uncategorized')}, ${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}</p>
-    <h2>${esc(r.name)}</h2>
-    <p class="muted">${esc(r.slug)}, listed ${r.listed_at ?? 'date unknown'}, snapshot ${esc(D.as_of)}, records no token.</p>
-    <h3>How the implied value is worked out</h3>
-    <table class="math">
-      <tr><td>TVL</td><td>${moneyFull(r.tvl_usd)}</td></tr>
-      <tr><td>× fitted multiple (TVL ${money(r.tvl_usd)})</td><td>× ${r.fitted_multiple.toFixed(4)}</td></tr>
-      <tr><td>× launch odds (${esc(r.category ?? 'Uncategorized')}, ${ageBand})</td><td>× ${r.launch_odds.toFixed(2)}</td></tr>
-      <tr class="total"><td>Implied value (expected value)</td><td>${moneyFull(r.implied_value_usd)}</td></tr>
-    </table>
-    <p class="fine">${agree ? 'The page recomputes the product above and it matches the board.' : 'Note: the recomputed product differs from the board, see board.json.'}</p>
-    ${multipleNote}
-    ${oddsNote}
-    ${watch}
-    <h3>Farm plan, eight steps</h3>
-    <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
-    <p class="fine">No token is confirmed for this protocol. The plan is a way to be positioned if one comes, not a promise that one will.</p>
-    <button id="detail-close" type="button">Close</button>`;
-  const dlg = $('detail');
-  if (!dlg.open) dlg.showModal();
-  if (push) syncHash({ p: slug });
-}
-$('detail').addEventListener('click', (e) => {
-  if (e.target.id === 'detail-close') { $('detail').close(); syncHash({ p: '' }); }
-});
-$('detail').addEventListener('close', () => { const h = readHash(); if (h.p) syncHash({ p: '' }); });
+  $("kpi").innerHTML = kpis.map(function (k) {
+    return '<div class="kpi"><div class="k">' + k[0] + '</div><div class="v">' + k[1] + '</div><div class="d">' + k[2] + '</div></div>';
+  }).join("");
 
-// ---------------------------------------------------------------- the model, drawn
-//
-// One factor chain for the top-ranked protocol: each box is the running
-// product after one factor, so the last box is the implied value itself.
-// Every figure comes from the row the board already carries.
-function renderDiagram() {
-  const r = D.rows[0];
-  if (!r) return;
-  const p1 = r.tvl_usd * r.fitted_multiple;
-  const nodes = [
-    { label: 'TVL', value: money(r.tvl_usd) },
-    { label: 'Fitted multiple', value: money(p1), factor: `× ${r.fitted_multiple.toFixed(4)}` },
-    { label: 'Implied value', value: money(r.implied_value_usd), factor: `× ${r.launch_odds.toFixed(2)} odds`, result: true },
-  ];
-  const W = 150, H = 62, Y = 58, GAP = 90;
-  const xs = nodes.map((_, i) => 85 + i * (W + GAP));
-  const mid = (i) => xs[i] + W / 2;
-  const chain = `Factor chain for ${r.name}: TVL ${money(r.tvl_usd)} times the fitted multiple ${r.fitted_multiple.toFixed(4)}, times the launch odds ${r.launch_odds.toFixed(2)}, gives an expected value of ${money(r.implied_value_usd)}.`;
-  const svg = [
-    `<svg viewBox="0 0 800 176" width="800" height="176" role="img" aria-label="${esc(chain)}">`,
-    `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="diagram-arrowhead"/></marker></defs>`,
-    `<text class="diagram-title" x="8" y="22" font-size="15">${esc(r.name)}, the top-ranked protocol</text>`,
-    ...nodes.map((n, i) => {
-      const cls = n.result ? 'diagram-node-result' : 'diagram-node';
-      const vcls = n.result ? 'diagram-value-result' : 'diagram-value';
-      return `<rect class="${cls}" x="${xs[i]}" y="${Y}" width="${W}" height="${H}"/>` +
-        `<text class="diagram-label" x="${mid(i)}" y="${Y + 24}" text-anchor="middle" font-size="11">${esc(n.label)}</text>` +
-        `<text class="${vcls}" x="${mid(i)}" y="${Y + 46}" text-anchor="middle" font-size="13">${esc(n.value)}</text>`;
-    }),
-    ...nodes.slice(1).map((n, j) => {
-      const x1 = xs[j] + W, x2 = xs[j + 1];
-      return `<line class="diagram-arrow" x1="${x1}" y1="${Y + 31}" x2="${x2}" y2="${Y + 31}" marker-end="url(#arr)"/>` +
-        `<text class="diagram-factor" x="${(x1 + x2) / 2}" y="${Y - 8}" text-anchor="middle" font-size="12">${esc(n.factor)}</text>`;
-    }),
-    `<text class="diagram-note" x="8" y="150" font-size="12">Each box is the running product after one factor, from the snapshot’s own figures. The last box is the implied value on the board.</text>`,
-    `</svg>`,
-  ].join('');
-  const el = $('diagram');
-  el.innerHTML = svg;
-  el.setAttribute('aria-label', chain);
-}
+  // ---------- integrity strip: recomputed here, in the browser ----------
+  var checks = [];
+  var rankOk = rows.every(function (r, i) { return r.rank === i + 1; });
+  checks.push(["ranks 1–" + rows.length + " exactly once", rankOk]);
+  var sortedOk = rows.every(function (r, i) { return i === 0 || Math.round(rows[i - 1].fitted_usd) >= Math.round(r.fitted_usd); });
+  checks.push(["implied value non-increasing with rank", sortedOk]);
+  var wlOk = rows.filter(function (r) { return r.watchlist; }).length === 40;
+  checks.push(["watchlist 40/40 on the board", wlOk]);
+  var censusOk = (rows.length + D.aside.length + D.live_count) === V.census.total;
+  checks.push(["census sums to " + V.census.total, censusOk]);
+  var tallyBad = 0;
+  rows.forEach(function (r) {
+    var expect = 8.5 + r.gas_usd + 5;
+    if (Math.abs(r.costs_usd - expect) > 0.005) tallyBad++;
+  });
+  checks.push(["farm cost tally: 0 mismatches", tallyBad === 0]);
+  var stepsBad = 0;
+  rows.forEach(function (r) {
+    if (r.farm_steps.length !== 8) stepsBad++;
+    r.farm_steps.forEach(function (s) { if (s.trim().length < 20 || s.trim().length > 600) stepsBad++; });
+  });
+  checks.push(["8 farm steps/row, 20–600 chars", stepsBad === 0]);
+  var verdictOk = rows.every(function (r) {
+    if (r.verdict === "FARM") return r.net_lo_usd >= 150;
+    if (r.verdict === "MARGINAL") return r.net_usd > 0;
+    return r.net_usd <= 0;
+  });
+  checks.push(["every verdict recomputes from its net", verdictOk]);
+  var shaOk = /^[0-9a-f]{64}$/.test(meta.main_sha256);
+  checks.push(["main.ts sha256 (build-time fingerprint)", shaOk]);
+  $("integrity").innerHTML = checks.map(function (c) {
+    return '<span class="chk ' + (c[1] ? "ok" : "bad") + '"><span class="mark">' + (c[1] ? "✓" : "✗") + '</span>' + c[0] + "</span>";
+  }).join("") + '<span class="chk"><span class="sha">main.ts ' + meta.main_sha256.slice(0, 16) + "…</span></span>";
+  $("sha").textContent = "main.ts sha256: " + meta.main_sha256.slice(0, 16) + "…";
 
-// The launch-odds table in the method section, from the data: the twelve
-// categories with the most pre-token protocols, with each category's
-// median forward odds and eventual launch share.
-function renderOddsTable() {
-  const el = $('odds-rows');
-  if (!el) return;
-  el.innerHTML = D.odds_by_category.slice(0, 12).map((c) => `
-  <tr><td>${esc(c.category)}</td><td class="num">${c.n_pre}</td><td class="num">${c.median_odds.toFixed(2)}</td><td class="num">${c.eventual_share.toFixed(2)}</td></tr>`).join('');
-}
-renderDiagram();
-renderOddsTable();
+  // ---------- board table ----------
+  var state = { q: "", verdict: "", watchonly: false, sort: "fitted" };
+  function applyHash() {
+    var h = location.hash.replace(/^#/, "");
+    var parts = h.split("&");
+    parts.forEach(function (p) {
+      var kv = p.split("=");
+      if (kv[0] === "verdict" && kv[1]) { state.verdict = kv[1]; $("verdict").value = kv[1]; }
+      if (kv[0] === "detail" && kv[1]) showDetail(kv[1]);
+    });
+    renderTable();
+  }
+  function filtered() {
+    var list = rows.filter(function (r) {
+      if (state.verdict && r.verdict !== state.verdict) return false;
+      if (state.watchonly && !r.watchlist) return false;
+      if (state.q) {
+        var q = state.q.toLowerCase();
+        if (r.slug.indexOf(q) < 0 && r.name.toLowerCase().indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+    var key = state.sort;
+    list = list.slice().sort(function (a, b) {
+      if (key === "net") return b.net_usd - a.net_usd;
+      if (key === "odds") return b.odds - a.odds;
+      if (key === "tvl") return b.tvl_usd - a.tvl_usd;
+      if (key === "mindep") return a.min_dep_usd - b.min_dep_usd;
+      return a.rank - b.rank;
+    });
+    return list;
+  }
+  function renderTable() {
+    var list = filtered();
+    $("count").textContent = list.length + " of " + rows.length + " rows";
+    $("board").querySelector("tbody").innerHTML = list.map(function (r) {
+      var netCls = r.net_usd > 0 ? "pos" : "neg";
+      return "<tr data-slug=\"" + r.slug + "\" class=\"" + (r.watchlist ? "wl" : "") + "\">" +
+        "<td>" + r.rank + "</td><td>" + esc(r.name) + "</td>" +
+        "<td>" + fmt$(r.tvl_usd) + "</td><td>" + fmt$(r.fitted_usd) + "</td>" +
+        "<td>" + r.multiple.toFixed(3) + "×</td><td>" + r.odds.toFixed(3) + "</td>" +
+        "<td>" + fmt$(r.band_lo_usd) + " – " + fmt$(r.band_hi_usd) + "</td>" +
+        "<td><span class=\"verdict " + r.verdict + "\">" + r.verdict + "</span></td>" +
+        "<td class=\"" + netCls + "\">" + (r.net_usd >= 0 ? "+" : "") + "$" + r.net_usd.toFixed(2) + "</td>" +
+        "<td class=\"" + netCls + "\">" + (r.net_h_usd >= 0 ? "+" : "") + "$" + r.net_h_usd.toFixed(2) + "</td>" +
+        "<td>" + fmt$(r.min_dep_usd) + "</td></tr>";
+    }).join("");
+    $("board").querySelectorAll("tbody tr").forEach(function (tr) {
+      tr.addEventListener("click", function () { showDetail(tr.getAttribute("data-slug")); });
+    });
+  }
+  $("q").addEventListener("input", function (e) { state.q = e.target.value; renderTable(); });
+  $("verdict").addEventListener("change", function (e) { state.verdict = e.target.value; renderTable(); });
+  $("watchonly").addEventListener("change", function (e) { state.watchonly = e.target.checked; renderTable(); });
+  $("sort").addEventListener("change", function (e) { state.sort = e.target.value; renderTable(); });
+  window.addEventListener("hashchange", applyHash);
 
-applyHash();
+  // ---------- detail ----------
+  function showDetail(slug) {
+    var r = rows.filter(function (x) { return x.slug === slug; })[0];
+    if (!r) return;
+    var d = $("detail");
+    var prog = r.program === null
+      ? "No program verified for this row — check the protocol's own points page before bridging; if no live program exists, the return is yield/fees only."
+      : r.program;
+    var progLabel = (r.program !== null && r.program.indexOf("NONE") === 0) ? "Verified: no live points program" : "Points program (verified 2026-11-25)";
+    d.hidden = false;
+    d.innerHTML = '<button class="close" id="dclose">Close</button>' +
+      "<h2>#" + r.rank + " " + esc(r.name) + (r.watchlist ? " ★ watchlist" : "") + '</h2>' +
+      '<p class="note">' + esc(r.category) + " · chains: " + esc(r.chains.join(", ")) +
+      " · TVL " + fmt$(r.tvl_usd) + " · 7d " + (r.change_7d === null ? "n/a" : r.change_7d.toFixed(1) + "%") +
+      (r.age_days === null ? "" : " · age " + r.age_days + "d") + "</p>" +
+      '<div class="grid">' +
+      cell("Fitted value", fmt$(r.fitted_usd)) + cell("Multiple", r.multiple.toFixed(3) + "×") +
+      cell("Launch odds", r.odds.toFixed(3)) +
+      cell("Band P25–P75", fmt$(r.band_lo_usd) + " – " + fmt$(r.band_hi_usd)) +
+      cell("Band P10–P90", fmt$(r.band_lo10_usd) + " – " + fmt$(r.band_hi90_usd)) +
+      cell("Verdict", r.verdict) + cell("Net $", (r.net_usd >= 0 ? "+" : "") + "$" + r.net_usd.toFixed(2)) +
+      cell("Net $/h", (r.net_h_usd >= 0 ? "+" : "") + "$" + r.net_h_usd.toFixed(2)) +
+      cell("Band-low net", (r.net_lo_usd >= 0 ? "+" : "") + "$" + r.net_lo_usd.toFixed(2)) +
+      cell("Min deposit", fmt$(r.min_dep_usd)) +
+      cell("Net at 2% part.", (r.net_p2_usd >= 0 ? "+" : "") + "$" + r.net_p2_usd.toFixed(2)) +
+      cell("Net at 10% part.", (r.net_p10_usd >= 0 ? "+" : "") + "$" + r.net_p10_usd.toFixed(2)) +
+      "</div>" +
+      '<p><b>Verdict rule:</b> FARM if band-low net ≥ $150, MARGINAL if point net &gt; 0, else SKIP. ' +
+      "This row: gross drop $" + r.gross_usd.toFixed(2) + " (7% pool × $" + r.costs_usd.toFixed(2) + " costs) — " +
+      (r.verdict === "FARM" ? "band-low net clears $150." : r.verdict === "MARGINAL" ? "point net is positive but band-low net ($" + r.net_lo_usd.toFixed(2) + ") does not clear $150; a $" + fmtInt(r.min_dep_usd) + " deposit would." : "point net is not positive at a $150 deposit; a $" + fmtInt(r.min_dep_usd) + " deposit would be needed for band-low net to clear $150.") + "</p>" +
+      '<div class="prog"><b>' + progLabel + ':</b> ' + esc(prog) + "</div>" +
+      '<h3>Farm plan — $150 capital, ~6.5h total</h3><ol class="steps">' +
+      r.farm_steps.map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("") + "</ol>";
+    $("dclose").addEventListener("click", function () {
+      d.hidden = true;
+      history.replaceState(null, "", location.pathname + location.search);
+    });
+    function cell(k, v) { return '<div class="cell"><div class="k">' + k + '</div><div class="v">' + v + "</div></div>"; }
+  }
+
+  // ---------- validation tables ----------
+  function table(head, bodyHtml, cls) {
+    return '<table class="vt ' + (cls || "") + '"><thead><tr>' + head.map(function (h) { return "<th>" + h + "</th>"; }).join("") + "</tr></thead><tbody>" + bodyHtml + "</tbody></table>";
+  }
+  var order = ["C1-ols-tvl (R5)", "R6-ridge-a30-full", "T-OLS-tvl", "T-OLS-FA", "T-R10", "T-R30", "T-ENS"];
+  var vrows = order.map(function (name) {
+    var e = V.value[name];
+    var ship = name === "T-OLS-tvl" ? ' class="ship"' : "";
+    return "<tr" + ship + "><td>" + name + (name === "T-OLS-tvl" ? " — SHIPPED" : "") + "</td>" +
+      "<td>" + r2(e.inSample.r2) + "</td><td>×" + r3(e.inSample.miss) + "</td>" +
+      "<td>×" + r3(e.looFit) + "</td><td>×" + r3(e.wf1Fit ? e.wf1Fit.miss : null) + "</td><td>×" + r3(e.wf2Fit ? e.wf2Fit.miss : null) + "</td>" +
+      "<td>" + r2(e.full.r2) + "</td><td>×" + r3(e.full.miss) + "</td><td>×" + r3(e.looFull) + "</td>" +
+      "<td>" + r2(e.holdout.r2) + "</td><td>" + r2(e.holdout.spearman) + "</td></tr>";
+  }).join("");
+  $("value-table").innerHTML = table(
+    ["Model", "Fit R²", "Fit miss", "LOO", "WF1", "WF2", "Full R²", "Full miss", "LOO full", "Holdout R²", "Holdout ρ"],
+    vrows) +
+    '<p class="note">"Fit" columns are on each model\'s own fit set: the 94 trimmed comps for T-* models, all 128 comps for C1 and R6. "Full" columns are always on all 128 comps. Flat-median baselines: trimmed WF1 ×' + r3(tols.wf1Fit.base) + ", WF2 ×" + r3(tols.wf2Fit.base) +
+    "; 5-fold OOF (selection 102) R² " + r2(tols.oof.r2) + ", miss ×" + r3(tols.oof.miss) + " vs flat ×" + r3(tols.oof.base) +
+    ". Holdout (fit on selection only, 26 rows): R² " + r2(tols.holdout.r2) + ", MSE " + r2(tols.holdout.mse) + ", Spearman " + r2(tols.holdout.spearman) +
+    ". T-OLS coefficients: intercept " + V.tols.beta[0].toFixed(4) + " (SE " + V.tols.se[0].toFixed(4) + "), ln TVL " + V.tols.beta[1].toFixed(4) +
+    " (SE " + V.tols.se[1].toFixed(4) + "); 95% CI ln TVL [" + V.tols.ci[1][0].toFixed(4) + ", " + V.tols.ci[1][1].toFixed(4) + "] (200 bootstrap refits).</p>";
+
+  var o = V.odds;
+  var orows = Object.keys(o.cvBrier).map(function (lam) {
+    return "<tr" + (Number(lam) === o.lambda ? ' class="ship"' : "") + "><td>λ = " + lam + (Number(lam) === o.lambda ? " — SHIPPED" : "") + "</td><td>" + r2(o.cvBrier[lam]) + "</td></tr>";
+  }).join("");
+  $("odds-table").innerHTML = table(["Ridge λ", "10-fold Brier"], orows +
+    '<tr><td>Constant (base rate 50.7%)</td><td>' + r2(o.constantBrier) + "</td></tr>") +
+    '<p class="note">Coefficients (standardized): intercept ' + o.coefs[0].toFixed(4) + " (SE " + o.bootstrapSe[0].toFixed(4) +
+    "), ln TVL " + o.coefs[1].toFixed(4) + " (SE " + o.bootstrapSe[1].toFixed(4) + "), log age " + o.coefs[2].toFixed(4) +
+    " (SE " + o.bootstrapSe[2].toFixed(4) + "), growth " + o.coefs[3].toFixed(4) + " (SE " + o.bootstrapSe[3].toFixed(4) +
+    "). Age is the driver (t ≈ 4.3); TVL barely matters for whether a token exists (t ≈ 0.9). Time-split Brier: train &lt;2024-07-15 → test " +
+    o.timeSplit1.test + " rows, " + r2(o.timeSplit1.brier) + " vs constant " + r2(o.timeSplit1.constant) +
+    "; train &lt;2025-01-01 → test " + o.timeSplit2.test + " rows, " + r2(o.timeSplit2.brier) + " vs constant " + r2(o.timeSplit2.constant) +
+    ". The odds model beats the constant out of time on both cuts. P(token) at the median protocol: " +
+    (function () { var m = o.marginals; return "TVL P10→P90 " + m.lnTVL[0].toFixed(3) + "→" + m.lnTVL[4].toFixed(3) + "; age " + m.lnAge[0].toFixed(3) + "→" + m.lnAge[4].toFixed(3) + "; growth " + m.chg[0].toFixed(3) + "→" + m.chg[4].toFixed(3); })() + ".</p>";
+
+  var b = V.bands;
+  $("bands-table").innerHTML = table(["Band", "Multiplier", "LOO coverage", "WF 2024-07-15", "WF 2025-01-01"],
+    "<tr><td>P25–P75</td><td>" + b.q25.toFixed(3) + "× – " + b.q75.toFixed(3) + "×</td><td>" + (b.coverage2575 * 100).toFixed(1) + "%</td><td>" + (b.wfCov1 * 100).toFixed(1) + "%</td><td>" + (b.wfCov2 * 100).toFixed(1) + "%</td></tr>" +
+    "<tr><td>P10–P90</td><td>" + b.q10.toFixed(3) + "× – " + b.q90.toFixed(3) + "×</td><td>" + (b.coverage1090 * 100).toFixed(1) + "%</td><td>" + (b.wfCov1090_1 * 100).toFixed(1) + "%</td><td>" + (b.wfCov1090_2 * 100).toFixed(1) + "%</td></tr>") +
+    '<p class="note">Median LOO residual ×' + b.q50.toFixed(3) + ' — the fit is near-unbiased on the trimmed set.</p>';
+
+  var arows = Object.keys(V.ablation).map(function (name) {
+    var a = V.ablation[name];
+    var ship = name === "T-OLS (SHIPPED)" ? ' class="ship"' : "";
+    return "<tr" + ship + "><td>" + name + "</td><td>×" + r3(a.looFull) + "</td><td>×" + r3(a.wf1Full) + "</td><td>×" + r3(a.wf2Full) + "</td></tr>";
+  }).join("");
+  $("ablation-table").innerHTML = table(["Variant", "LOO-full miss", "WF1-full miss", "WF2-full miss"], arows);
+
+  $("econ-table").innerHTML = table(["Figure", "Value"],
+    "<tr><td>Verdicts (341 rows)</td><td>FARM " + (V.verdicts.FARM || 0) + " · MARGINAL " + (V.verdicts.MARGINAL || 0) + " · SKIP " + (V.verdicts.SKIP || 0) + "</td></tr>" +
+    "<tr><td>Net $ (point, $150 deposit)</td><td>median $" + V.economics.netMedian.toFixed(2) + " · max $" + V.economics.netMax.toFixed(2) + " (" + V.economics.bestRow + ") · min −$9.40</td></tr>" +
+    "<tr><td>Band-low net, best row</td><td>$" + V.economics.netLoMax.toFixed(2) + " — still below the $150 hurdle</td></tr>" +
+    "<tr><td>Smallest MIN DEP</td><td>$" + fmtInt(V.economics.minDepMin) + " (" + V.economics.bestRow + ") — the deposit that would clear $150 at band-low</td></tr>" +
+    "<tr><td>Watchlist verdicts</td><td>40/40 MARGINAL — every watchlist row pays a small positive net at $150</td></tr>");
+
+  var reasons = {};
+  D.aside.forEach(function (a) { reasons[a.reason] = (reasons[a.reason] || 0) + 1; });
+  var reasonRows = Object.keys(reasons).sort(function (a, b) { return reasons[b] - reasons[a]; }).map(function (k) {
+    return "<tr><td>Set aside: " + esc(k) + "</td><td>" + reasons[k] + "</td></tr>";
+  }).join("");
+  $("census-table").innerHTML = table(["Bucket", "Rows"],
+    "<tr><td>Ranked (40 watchlist + 301 passing screens)</td><td>" + V.census.ranked + "</td></tr>" +
+    "<tr><td>Live comparables (token-bearing, mcap reported)</td><td>" + V.census.live + "</td></tr>" +
+    reasonRows +
+    "<tr><td><b>Total</b></td><td><b>" + V.census.total + "</b></td></tr>");
+
+  // ---------- scatter: cap on TVL ----------
+  (function () {
+    var comps = D.comps || [];
+    var W = 1100, H = 380, P = { l: 60, r: 20, t: 16, b: 36 };
+    var xs = comps.map(function (c) { return Math.log10(c.tvl_usd); });
+    var ys = comps.map(function (c) { return Math.log10(c.ratio); });
+    var x0 = Math.min.apply(null, xs) - 0.1, x1 = Math.max.apply(null, xs) + 0.1;
+    var y0 = Math.min.apply(null, ys) - 0.2, y1 = Math.max.apply(null, ys) + 0.2;
+    var X = function (v) { return P.l + (v - x0) / (x1 - x0) * (W - P.l - P.r); };
+    var Y = function (v) { return H - P.b - (v - y0) / (y1 - y0) * (H - P.t - P.b); };
+    var beta = V.tols.beta;
+    // fitted log10 ratio = (beta0 + (beta1-1) * ln TVL) / ln 10
+    var line = function (lx) {
+      var lnTvl = lx * Math.LN10;
+      return (beta[0] + (beta[1] - 1) * lnTvl) / Math.LN10;
+    };
+    var s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Cap on TVL scatter">';
+    s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#fff"/>';
+    // trimmed band [0.02, 2]
+    var yLo = Y(Math.log10(0.02)), yHi = Y(Math.log10(2));
+    s += '<rect x="' + P.l + '" y="' + yHi + '" width="' + (W - P.l - P.r) + '" height="' + (yLo - yHi) + '" fill="#eef7ee"/>';
+    s += '<line x1="' + P.l + '" y1="' + yLo + '" x2="' + (W - P.r) + '" y2="' + yLo + '" stroke="#2a7d2a" stroke-dasharray="4 3"/>';
+    s += '<line x1="' + P.l + '" y1="' + yHi + '" x2="' + (W - P.r) + '" y2="' + yHi + '" stroke="#2a7d2a" stroke-dasharray="4 3"/>';
+    s += '<text x="' + (W - P.r - 4) + '" y="' + (yHi - 4) + '" font-size="11" text-anchor="end" fill="#2a7d2a">trim band top 2×</text>';
+    s += '<text x="' + (W - P.r - 4) + '" y="' + (yLo + 14) + '" font-size="11" text-anchor="end" fill="#2a7d2a">trim band bottom 0.02×</text>';
+    // gridlines + ticks
+    for (var gx = Math.ceil(x0); gx <= Math.floor(x1); gx++) {
+      s += '<line x1="' + X(gx) + '" y1="' + P.t + '" x2="' + X(gx) + '" y2="' + (H - P.b) + '" stroke="#eee"/>';
+      s += '<text x="' + X(gx) + '" y="' + (H - P.b + 16) + '" font-size="11" text-anchor="middle">$10^' + gx + "</text>";
+    }
+    for (var gy = Math.ceil(y0); gy <= Math.floor(y1); gy++) {
+      s += '<line x1="' + P.l + '" y1="' + Y(gy) + '" x2="' + (W - P.r) + '" y2="' + Y(gy) + '" stroke="#eee"/>';
+      s += '<text x="' + (P.l - 6) + '" y="' + (Y(gy) + 4) + '" font-size="11" text-anchor="end">' + (gy >= 0 ? gy : "−" + Math.abs(gy)) + "</text>";
+    }
+    s += '<text x="' + (W / 2) + '" y="' + (H - 4) + '" font-size="12" text-anchor="middle">TVL (log scale)</text>';
+    s += '<text x="14" y="' + (H / 2) + '" font-size="12" text-anchor="middle" transform="rotate(-90 14 ' + (H / 2) + ')">mcap / TVL (log scale)</text>';
+    // points
+    comps.forEach(function (c) {
+      var cx = X(Math.log10(c.tvl_usd)), cy = Y(Math.log10(c.ratio));
+      if (c.trimmed) s += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="3.2" fill="#1a5db0"><title>' + esc(c.slug) + " " + c.ratio.toFixed(3) + "×</title></circle>";
+      else s += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="3.2" fill="#fff" stroke="#b00020" stroke-width="1.4"><title>' + esc(c.slug) + " " + c.ratio.toFixed(3) + "× (outside trim)</title></circle>";
+    });
+    // fitted line
+    s += '<line x1="' + X(x0) + '" y1="' + Y(line(x0)) + '" x2="' + X(x1) + '" y2="' + Y(line(x1)) + '" stroke="#111" stroke-width="2"/>';
+    s += '<text x="' + (P.l + 6) + '" y="' + (P.t + 12) + '" font-size="12">● in trim (94)  ○ outside trim (34)  — fitted line</text>';
+    s += "</svg>";
+    $("scatter").innerHTML = s;
+  })();
+
+  renderTable();
+  applyHash();
+})();

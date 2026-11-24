@@ -1,92 +1,125 @@
-// main.ts — round-6 entrypoint for make.fun token-radar-01.
-// Written fresh 2026-11-24. Reads a snapshot, fits the round-6 model at
-// runtime, writes board.json + data.js, copies the dashboard, and builds
-// the dossier once the screenshots exist.
-//
-// Usage:
-//   MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
-// Run once to build the data, take the three screenshots into
-// out/screenshots/, then run again to write out/dossier.json.
-import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { buildBoard } from "./lib/model.ts";
-import type { Snapshot } from "./lib/model.ts";
+// Round 7 entrypoint — token-radar-01.
+// Reads /input/snapshot.json (or argv[2]), fits the value + odds models at
+// runtime from the snapshot, writes /output/board.json, /output/data.js,
+// copies dashboard/ + screenshots/ to /output, and writes /output/dossier.json
+// with buildDossier from vendor/makefun-board.ts.
+// Stdlib only, erasable TypeScript. Never deletes the output directory
+// (it is a mount point at grade time; the entry runs as uid 65534).
+
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildDossier } from "./vendor/makefun-board.ts";
+import { buildBoard, TRIM_LO, TRIM_HI } from "./lib/model.ts";
+import type { Snapshot } from "./lib/model.ts";
 
-function flag(name: string): string | null {
-  const i = process.argv.indexOf(name);
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
-}
-
-const input = flag("--input") ?? "input/snapshot.json";
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? flag("--out") ?? "out";
-const snap = JSON.parse(readFileSync(input, "utf8")) as Snapshot;
-const built = buildBoard(snap);
-
-mkdirSync(outDir, { recursive: true });
-
-const board = {
-  as_of: snap.as_of,
-  source: snap.source,
-  floor_usd: snap.floor_usd,
-  watchlist_size: built.watchlistSize,
-  board_size: built.rows.length,
-  rows: built.rows,
+// Fixed evaluation splits (locked before round 6; split_hash 17c48a99715a75c3).
+// The holdout (26) is never fitted on during selection; the 5 folds (seed 7)
+// cover the 102 selection comps. Embedded here because the entry runs in a
+// sandbox with only the repo and /input/snapshot.json.
+const SPLITS: { holdout_slugs: string[]; selection_slugs: string[]; folds: string[][] } = {
+  holdout_slugs: ["acryptos", "api3", "aquarius-stellar", "beefy", "bitway-earn", "brickken", "cap", "chutes", "enzyme-finance", "equilibria", "evaa-protocol", "gains-network", "gravity-bridge", "harmonix-finance", "mansory", "manta-pacific", "mantle-bridge", "merlins-seal", "mexc", "quickswap-dex", "re", "serum", "thorchain-dex", "tornado-cash", "treehouse-protocol", "veno-finance"],
+  selection_slugs: ["aave-v2", "across", "ankr", "anvil", "astar-dapps-staking", "aura", "b2-buzz", "babylon-protocol", "backpack", "badger-dao", "belt-finance", "benqi-lending", "biconomy.com", "bifi", "bitkan", "bitkub", "blur-bids", "cbridge", "concentrator", "concrete", "convex-finance", "cronos-zkevm-bridge", "dolomite", "eigencloud", "ekubo", "exactly", "fables", "falcon-finance", "flokifi-locker", "flying-tulip-lend", "frankencoin", "fuel-bridge", "fx-protocol", "gate", "gearbox", "grove-finance", "harvest-finance", "hegic", "hipo", "huma", "hydration-dex", "hyperlane", "index-coop", "infrared-finance", "inverse-finance-firm", "kaio", "kava-lend", "kinetic", "kyros", "lido", "liqwid", "looped-hype", "merlinswap", "metalx-lending", "meth-protocol", "morpheusai", "nexo", "obol", "okx", "osmosis-dex", "pinksale", "polygon-bridge", "portal", "pumpbtc", "railgun", "rain", "renzo", "reserve-protocol", "reservoir-protocol", "resolv-usr", "resupply", "rocket-pool", "sdai", "solomon-usdv", "solstice", "ssv-network", "stader", "starknet-bridge", "ston.fi", "streamflow", "stusdt", "superfluid", "sushiswap", "swissborg", "symbiosis", "synapse-cross-chain-bridge", "taiko-bridge", "team-finance", "tectonic", "uranium.io", "usd-ai", "usual-usd0", "veranta", "waterneuron", "wise-token", "xdai-stake-bridge", "xsy", "yield-basis", "yield-yak-aggregator", "zama", "zerobase-cedefi", "zyfai"],
+  folds: [
+    ["babylon-protocol", "concrete", "renzo", "anvil", "grove-finance", "zama", "reserve-protocol", "metalx-lending", "cronos-zkevm-bridge", "concentrator", "resolv-usr", "solstice", "hipo", "wise-token", "portal", "usd-ai", "bitkan", "infrared-finance", "sdai", "gate", "swissborg"],
+    ["veranta", "rain", "harvest-finance", "zyfai", "ssv-network", "flokifi-locker", "streamflow", "huma", "symbiosis", "okx", "bitkub", "ankr", "stader", "stusdt", "merlinswap", "rocket-pool", "tectonic", "kava-lend", "fables", "bifi", "liqwid"],
+    ["astar-dapps-staking", "morpheusai", "kyros", "eigencloud", "frankencoin", "reservoir-protocol", "blur-bids", "belt-finance", "gearbox", "starknet-bridge", "xdai-stake-bridge", "ekubo", "kaio", "hydration-dex", "flying-tulip-lend", "ston.fi", "benqi-lending", "dolomite", "biconomy.com", "resupply", "waterneuron"],
+    ["fx-protocol", "yield-basis", "hegic", "superfluid", "team-finance", "railgun", "convex-finance", "nexo", "cbridge", "falcon-finance", "zerobase-cedefi", "usual-usd0", "synapse-cross-chain-bridge", "kinetic", "taiko-bridge", "hyperlane", "aave-v2", "aura", "b2-buzz", "uranium.io"],
+    ["index-coop", "obol", "pinksale", "yield-yak-aggregator", "inverse-finance-firm", "badger-dao", "solomon-usdv", "fuel-bridge", "polygon-bridge", "exactly", "backpack", "xsy", "lido", "sushiswap", "osmosis-dex", "pumpbtc", "across", "looped-hype", "meth-protocol"],
+  ],
 };
-writeFileSync(join(outDir, "board.json"), JSON.stringify(board, null, 2) + "\n");
 
-const payload = {
-  as_of: snap.as_of,
-  source: snap.source,
-  floor_usd: snap.floor_usd,
-  model: built.model,
-  model_version: "radar-6",
-  watchlist_size: built.watchlistSize,
-  board_size: built.rows.length,
-  early_size: built.rows.length - built.watchlistSize,
-  live_size: built.live.length,
-  set_aside_size: built.setAside.length,
-  fit: built.fit,
-  odds_by_category: built.oddsByCategory,
-  rows: built.rows.map((r) => ({
-    rank: r.rank,
+function main(): void {
+  const inputPath = process.argv[2] || "/input/snapshot.json";
+  const outDir = process.argv[3] || "/output";
+  const repoRoot = dirname(fileURLToPath(import.meta.url));
+  const mainPath = fileURLToPath(import.meta.url);
+
+  const snap = JSON.parse(readFileSync(inputPath, "utf8")) as Snapshot;
+  const { rows, aside, liveCount, validation } = buildBoard(snap, SPLITS);
+
+  // Board rows for the gate: whole-dollar implied values, ranks 1..N.
+  const boardRows = rows.map((r) => ({
     slug: r.slug,
     name: r.name,
-    category: r.category,
-    chains: r.chains,
-    tvl_usd: r.tvl_usd,
-    change_7d: r.change_7d,
-    mcap_usd: r.mcap_usd,
-    listed_at: r.listed_at,
-    age_days: r.age_days,
-    implied_value_usd: r.implied_value_usd,
-    fitted_multiple: r.model.fitted_multiple,
-    launch_odds: r.model.launch_odds,
+    rank: r.rank,
+    implied_value_usd: Math.round(r.fitted_usd),
     farm_steps: r.farm_steps,
-  })),
-  live: built.live,
-  set_aside: built.setAside,
-};
-writeFileSync(join(outDir, "data.js"), "window.RADAR=" + JSON.stringify(payload) + ";\n");
+  }));
 
-cpSync("dashboard", join(outDir, "dashboard"), { recursive: true });
+  // Fingerprint of this entrypoint, so the dashboard's integrity strip can
+  // show the exact main.ts that built the board.
+  const mainSha = createHash("sha256").update(readFileSync(mainPath)).digest("hex");
 
-const shotsDir = join(outDir, "screenshots");
-const shots = existsSync(shotsDir)
-  ? readdirSync(shotsDir).filter((f) => /\.(png|jpe?g)$/i.test(f))
-  : [];
-if (shots.length >= 3) {
-  const dossier = buildDossier(resolve(outDir), {
-    text_max_bytes: 65536,
-    screenshots: { max: 4, max_bytes: 512 * 1024 },
-  });
+  mkdirSync(outDir, { recursive: true });
+
+  writeFileSync(join(outDir, "board.json"), JSON.stringify({ rows: boardRows }, null, 1) + "\n", "utf8");
+
+  const data = {
+    meta: {
+      competition: "token-radar-01",
+      round: 7,
+      as_of: snap.as_of,
+      built_at: new Date().toISOString(),
+      main_sha256: mainSha,
+      model: "T-OLS (trimmed OLS log mcap on log TVL, mcap/TVL in [0.02, 2], 94 comps)",
+      odds: "ridge logistic lam 0.1 on [ln TVL, log age, clipped growth], target symbol non-null, 645 dated",
+      split_hash: "17c48a99715a75c3",
+    },
+    census: validation.census,
+    verdicts: validation.verdicts,
+    economics: validation.economics,
+    validation,
+    // Live comparables for the cap-on-TVL scatter and the comparables table.
+    comps: snap.protocols
+      .filter((p) => p.mcap_usd !== null && (p.mcap_usd as number) > 0)
+      .map((p) => ({
+        slug: p.slug,
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd as number,
+        ratio: (p.mcap_usd as number) / p.tvl_usd,
+        trimmed: (p.mcap_usd as number) / p.tvl_usd >= TRIM_LO && (p.mcap_usd as number) / p.tvl_usd <= TRIM_HI,
+        listed_at: p.listed_at,
+      })),
+    rows,
+    aside,
+    live_count: liveCount,
+  };
+  writeFileSync(join(outDir, "data.js"), "var RADAR_DATA = " + JSON.stringify(data) + ";\n", "utf8");
+
+  // Copy the dashboard and the screenshots into /output (never delete it).
+  const dashSrc = join(repoRoot, "dashboard");
+  const shotsSrc = join(repoRoot, "screenshots");
+  if (existsSync(dashSrc)) cpSync(dashSrc, join(outDir, "dashboard"), { recursive: true });
+  if (existsSync(shotsSrc)) cpSync(shotsSrc, join(outDir, "screenshots"), { recursive: true });
+
+  // Dossier, byte-for-byte as the library writes it.
+  const dossier = buildDossier(outDir, { text_max_bytes: 65536 });
   writeFileSync(join(outDir, "dossier.json"), dossier);
-  console.log(`dossier written (${shots.length} screenshots)`);
-} else {
-  console.log(`dossier skipped: ${shots.length} screenshot(s) in out/screenshots/ (need 3)`);
+
+  // Build summary for the operator (stdout, not part of the entry).
+  const v = validation.value["T-OLS-tvl"];
+  console.log(JSON.stringify({
+    rows: rows.length,
+    aside: aside.length,
+    live: liveCount,
+    total: snap.protocols.length,
+    watchlist: rows.filter((r) => r.watchlist).length,
+    verdicts: validation.verdicts,
+    tols_beta: validation.tols.beta,
+    tols_se: validation.tols.se,
+    value_trimmed: { r2: v.inSample.r2, miss: v.inSample.miss },
+    value_full: { r2: v.full.r2, miss: v.full.miss },
+    loo_trimmed: v.looFit, loo_full: v.looFull,
+    wf1_trimmed: v.wf1Fit, wf2_trimmed: v.wf2Fit,
+    oof: v.oof, holdout: v.holdout,
+    odds_brier: validation.odds.cvBrier, odds_constant: validation.odds.constantBrier,
+    odds_coefs: validation.odds.coefs, odds_se: validation.odds.bootstrapSe,
+    bands: validation.bands,
+    main_sha256: mainSha,
+    board_bytes: JSON.stringify({ rows: boardRows }).length,
+  }, null, 1));
 }
 
-console.log(`board: ${built.rows.length} rows (watchlist ${built.watchlistSize}, live comparables ${built.live.length})`);
-console.log(`ridge: lambda 30, n=${built.ridge.n}, R^2=${built.ridge.rSquared.toFixed(4)}, resid SD=${built.ridge.residualSd.toFixed(4)}`);
-console.log(`saturating curve: Finf=${built.saturating.finf.toFixed(4)}, tau=${built.saturating.tau.toFixed(0)}d`);
-console.log(`top row: ${built.rows[0].name} — implied $${built.rows[0].implied_value_usd.toLocaleString("en-US")}`);
+main();
